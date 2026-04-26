@@ -7835,6 +7835,7 @@ ConstraintSystem::matchTypes(Type type1, Type type2, ConstraintKind kind,
 
     case TypeKind::Existential:
     case TypeKind::ProtocolComposition:
+    case TypeKind::NarrowedAny:
     case TypeKind::ParameterizedProtocol:
       switch (kind) {
       case ConstraintKind::Equal:
@@ -8595,6 +8596,7 @@ ConstraintSystem::simplifyConstructionConstraint(
   case TypeKind::ElementArchetype:
   case TypeKind::DynamicSelf:
   case TypeKind::ProtocolComposition:
+  case TypeKind::NarrowedAny:
   case TypeKind::ParameterizedProtocol:
   case TypeKind::Protocol:
   case TypeKind::Existential:

@@ -847,6 +847,12 @@ namespace {
                                        IsTypeExpansionSensitive_t isSensitive) {
       return visitExistentialType(type, origType, isSensitive);
     }
+    RetTy visitNarrowedAnyType(CanNarrowedAnyType type,
+                               AbstractionPattern origType,
+                               IsTypeExpansionSensitive_t isSensitive) {
+      // Phase 2: lower as a generic existential, identical to ProtocolComposition.
+      return visitExistentialType(type, origType, isSensitive);
+    }
     RetTy visitParameterizedProtocolType(CanParameterizedProtocolType type,
                                          AbstractionPattern origType,
                                          IsTypeExpansionSensitive_t isSensitive) {

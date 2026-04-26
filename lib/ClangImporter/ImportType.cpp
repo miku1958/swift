@@ -2140,6 +2140,9 @@ private:
   NEVER_VISIT(SILMoveOnlyWrappedType)
 
   VISIT(ProtocolCompositionType, compose)
+  // Narrowed `Any` cannot appear in imported Clang types today;
+  // forbid until proven necessary.
+  NEVER_VISIT(NarrowedAnyType)
 
   // ProtocolCompositionType doesn't handle ParameterizedProtocolType
   // correctly, but we currently never import anything with it, so forbid it

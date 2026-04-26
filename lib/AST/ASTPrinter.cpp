@@ -7823,6 +7823,12 @@ public:
       Printer.printKeyword("Any", Options);
   }
 
+  void visitNarrowedAnyType(NarrowedAnyType *T,
+                            NonRecursivePrintOptions nrOptions) {
+    interleave(T->getAlternatives(), [&](Type Ty) { visit(Ty); },
+               [&] { Printer << " | "; });
+  }
+
   void visitParameterizedProtocolType(ParameterizedProtocolType *T,
                                       NonRecursivePrintOptions nrOptions) {
     visit(T->getBaseType());

@@ -6278,6 +6278,14 @@ public:
   }
 
   void
+  visitNarrowedAnyType(const NarrowedAnyType *narrowed) {
+    // Phase 2 placeholder: narrowed `Any` doesn't yet have a stable
+    // serialised layout (that's Phase 3 work alongside mangling). Refuse
+    // serialisation rather than emit garbage.
+    llvm_unreachable("serialisation of narrowed `Any` not yet implemented");
+  }
+
+  void
   visitProtocolCompositionType(const ProtocolCompositionType *composition) {
     using namespace decls_block;
 

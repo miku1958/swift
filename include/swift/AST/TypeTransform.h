@@ -1095,6 +1095,24 @@ case TypeKind::Id:
                                           pc->hasExplicitAnyObject());
     }
 
+    case TypeKind::NarrowedAny: {
+      auto na = cast<NarrowedAnyType>(base);
+      SmallVector<Type, 4> substAlts;
+      auto alts = na->getAlternatives();
+      bool anyChanged = false;
+      for (auto alt : alts) {
+        auto substAlt = doIt(alt, pos);
+        if (!substAlt)
+          return Type();
+        substAlts.push_back(substAlt);
+        if (substAlt.getPointer() != alt.getPointer())
+          anyChanged = true;
+      }
+      if (!anyChanged)
+        return t;
+      return NarrowedAnyType::get(ctx, substAlts);
+    }
+
     case TypeKind::ParameterizedProtocol: {
       auto *ppt = cast<ParameterizedProtocolType>(base);
       Type base = ppt->getBaseType();

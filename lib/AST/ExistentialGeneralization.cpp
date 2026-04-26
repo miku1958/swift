@@ -113,6 +113,18 @@ private:
                                         origType->hasExplicitAnyObject());
   }
 
+  Type visitNarrowedAnyType(CanNarrowedAnyType origType) {
+    // The alternatives of a narrowed `Any` are not substitutable;
+    // generalize each in place, preserving order.
+    auto origAlts = origType.getAlternatives();
+    SmallVector<Type, 4> newAlts;
+    newAlts.reserve(origAlts.size());
+    for (auto origAlt : origAlts) {
+      newAlts.push_back(generalizeStructure(origAlt));
+    }
+    return NarrowedAnyType::get(ctx, newAlts);
+  }
+
   // Generalize the type arguments of nominal types.
   Type visitBoundGenericType(CanBoundGenericType origType) {
     return generalizeGenericArguments(origType->getDecl(), origType);

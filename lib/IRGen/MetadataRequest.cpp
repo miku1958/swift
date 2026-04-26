@@ -2259,6 +2259,18 @@ namespace {
       return setLocal(type, MetadataResponse::forComplete(metadata));
     }
 
+    MetadataResponse
+    visitNarrowedAnyType(CanNarrowedAnyType type,
+                         DynamicMetadataRequest request) {
+      // Phase 2 placeholder: emit metadata as if the constraint were `Any`.
+      // Real metadata layout (closed-conformer table) is Phase 3 work.
+      auto &ctx = type->getASTContext();
+      auto anyType = CanProtocolCompositionType(
+          ProtocolCompositionType::theAnyType(ctx)
+              ->castTo<ProtocolCompositionType>());
+      return visitProtocolCompositionType(anyType, request);
+    }
+
 
     UNSUPPORTED_METADATA(ParameterizedProtocol)
     UNSUPPORTED_METADATA(ReferenceStorage)

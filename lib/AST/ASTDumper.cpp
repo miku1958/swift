@@ -6824,6 +6824,14 @@ namespace {
       printFoot();
     }
 
+    void visitNarrowedAnyType(NarrowedAnyType *T, Label label) {
+      printCommon("narrowed_any_type", label);
+      printList(T->getAlternatives(), [&](auto alt, Label label) {
+        printRec(alt, label);
+      }, Label::optional("alternatives"));
+      printFoot();
+    }
+
     void visitParameterizedProtocolType(ParameterizedProtocolType *T,
                                         Label label) {
       printCommon("parameterized_protocol_type", label);

@@ -7913,6 +7913,7 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
   case TypeKind::Struct:
   case TypeKind::Protocol:
   case TypeKind::ProtocolComposition:
+  case TypeKind::NarrowedAny:
   case TypeKind::ParameterizedProtocol:
   case TypeKind::Existential:
   case TypeKind::BoundGenericEnum:
@@ -7935,6 +7936,7 @@ Expr *ExprRewriter::coerceToType(Expr *expr, Type toType,
   case TypeKind::Existential:
   case TypeKind::ExistentialMetatype:
   case TypeKind::ProtocolComposition:
+  case TypeKind::NarrowedAny:
   case TypeKind::ParameterizedProtocol:
   case TypeKind::Protocol:
     return coerceExistential(expr, toType, locator);

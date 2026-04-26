@@ -209,6 +209,13 @@ class Traversal : public TypeVisitor<Traversal, bool>
     return false;
   }
 
+  bool visitNarrowedAnyType(NarrowedAnyType *ty) {
+    for (auto alt : ty->getAlternatives())
+      if (doIt(alt))
+        return true;
+    return false;
+  }
+
   bool visitParameterizedProtocolType(ParameterizedProtocolType *ty) {
     if (doIt(ty->getBaseType()))
       return true;

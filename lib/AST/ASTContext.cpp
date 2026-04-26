@@ -600,6 +600,7 @@ struct ASTContext::Implementation {
     llvm::FoldingSet<BuiltinFixedArrayType> BuiltinFixedArrayTypes;
     llvm::FoldingSet<BuiltinBorrowType> BuiltinBorrowTypes;
     llvm::FoldingSet<ProtocolCompositionType> ProtocolCompositionTypes;
+    llvm::FoldingSet<NarrowedAnyType> NarrowedAnyTypes;
     llvm::FoldingSet<ParameterizedProtocolType> ParameterizedProtocolTypes;
     llvm::FoldingSet<LayoutConstraintInfo> LayoutConstraints;
     llvm::DenseMap<std::pair<OpaqueTypeDecl *, SubstitutionMap>,
@@ -4640,6 +4641,37 @@ ProtocolCompositionType::build(const ASTContext &C, ArrayRef<Type> Members,
   C.getImpl().getArena(arena).ProtocolCompositionTypes.InsertNode(
       compTy, InsertPos);
   return compTy;
+}
+
+NarrowedAnyType *
+NarrowedAnyType::build(const ASTContext &C, ArrayRef<Type> Alternatives) {
+  assert(!Alternatives.empty() &&
+         "narrowed `Any` must have at least one alternative");
+
+  void *InsertPos = nullptr;
+  llvm::FoldingSetNodeID ID;
+  NarrowedAnyType::Profile(ID, Alternatives);
+
+  bool isCanonical = true;
+  RecursiveTypeProperties properties;
+  for (Type t : Alternatives) {
+    if (!t->isCanonical())
+      isCanonical = false;
+    properties |= t->getRecursiveProperties();
+  }
+
+  auto arena = getArena(properties);
+
+  if (auto existing = C.getImpl().getArena(arena).NarrowedAnyTypes
+          .FindNodeOrInsertPos(ID, InsertPos))
+    return existing;
+
+  auto size = totalSizeToAlloc<Type>(Alternatives.size());
+  auto mem = C.Allocate(size, alignof(NarrowedAnyType), arena);
+  auto *ty = new (mem) NarrowedAnyType(isCanonical ? &C : nullptr,
+                                       Alternatives, properties);
+  C.getImpl().getArena(arena).NarrowedAnyTypes.InsertNode(ty, InsertPos);
+  return ty;
 }
 
 ParameterizedProtocolType *ParameterizedProtocolType::get(const ASTContext &C,

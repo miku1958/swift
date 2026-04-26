@@ -3022,15 +3022,26 @@ NeverNullType TypeResolver::resolveType(TypeRepr *repr,
     }
 
   case TypeReprKind::NarrowedAny: {
-    // Phase 1 PoC: resolve a narrowed `Any` (e.g. `Int | String`) to plain
-    // `Any` so the existing existential machinery handles values uniformly.
-    // Real subtyping/lattice semantics will land in a later phase.
+    // Phase 2a: the `NarrowedAnyType` node and its registry exist
+    // (TypeNodes.def + Types.h + ASTContext factory + visitors), but
+    // resolution still desugars to plain `Any` because plumbing the new
+    // type through Sema → IRGen requires Phase 2b work (constraint-type
+    // recognition, mangling, debug-info, witness synthesis). For now we
+    // construct a `NarrowedAnyType` purely for AST inspection / future
+    // tests, then immediately discard it in favour of the existing
+    // `Any` lowering path.
     auto narrowed = cast<NarrowedAnyTypeRepr>(repr);
-    // Resolve each alternative for diagnostics / name lookup side-effects.
-    for (auto *member : narrowed->getTypes()) {
-      (void)resolveType(member, options);
-    }
     auto &ctx = getASTContext();
+    SmallVector<Type, 4> resolvedAlts;
+    for (auto *member : narrowed->getTypes()) {
+      Type t = resolveType(member, options);
+      if (!t || t->hasError())
+        return ErrorType::get(ctx);
+      resolvedAlts.push_back(t);
+    }
+    // Build the new Type node (keeps the FoldingSet warm; Phase 2b will
+    // start consuming this as the resolved type).
+    (void)NarrowedAnyType::get(ctx, resolvedAlts);
     return ExistentialType::get(ctx.TheAnyType);
   }
 

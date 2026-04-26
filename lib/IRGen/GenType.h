@@ -172,6 +172,7 @@ private:
   const TypeInfo *convertModuleType(ModuleType *T);
   const TypeInfo *convertProtocolType(ProtocolType *T);
   const TypeInfo *convertProtocolCompositionType(ProtocolCompositionType *T);
+  const TypeInfo *convertNarrowedAnyType(NarrowedAnyType *T);
   const TypeInfo *convertParameterizedProtocolType(ParameterizedProtocolType *T);
   const TypeInfo *convertExistentialType(ExistentialType *T);
   const TypeInfo *convertPackType(SILPackType *T);

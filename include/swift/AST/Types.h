@@ -495,6 +495,12 @@ protected:
     Count : 32
   );
 
+  SWIFT_INLINE_BITFIELD_FULL(NarrowedAnyType, TypeBase, 32,
+    : NumPadBits,
+    /// The number of alternatives in the narrowed `Any` type.
+    Count : 32
+  );
+
   SWIFT_INLINE_BITFIELD_FULL(ParameterizedProtocolType, TypeBase, 32,
     /// The number of type arguments.
     ArgCount : 32
@@ -6835,6 +6841,63 @@ BEGIN_CAN_TYPE_WRAPPER(ProtocolCompositionType, Type)
   }
 END_CAN_TYPE_WRAPPER(ProtocolCompositionType, Type)
 
+/// NarrowedAnyType - A constraint type that admits values whose dynamic type
+/// is one of a closed, declared set of alternatives.
+///
+/// \code
+/// var x: Int | String
+/// \endcode
+///
+/// As a *value* type the narrowed `Any` is wrapped in `ExistentialType` so
+/// the existing existential machinery handles boxing, opening, `is`/`as`.
+/// `NarrowedAnyType` itself is the constraint — analogous to how
+/// `ProtocolCompositionType` is the constraint inside `any P & Q`.
+///
+/// In Phase 2 of the implementation, the constraint is treated as
+/// behaviourally equivalent to `Any`. Real subtype rules (leaf injection,
+/// leaf-set comparison, conformance synthesis) land in subsequent phases.
+class NarrowedAnyType final : public TypeBase,
+    public llvm::FoldingSetNode,
+    private llvm::TrailingObjects<NarrowedAnyType, Type> {
+  friend TrailingObjects;
+
+public:
+  /// Retrieve an instance of a narrowed `Any` type with the given set of
+  /// alternative types. The list is preserved in declaration order
+  /// (no deduplication, no sorting, no absorption).
+  static Type get(const ASTContext &C, ArrayRef<Type> Alternatives);
+
+  /// Retrieve the alternatives that make up this narrowed `Any`.
+  ArrayRef<Type> getAlternatives() const {
+    return getTrailingObjects(
+        static_cast<size_t>(Bits.NarrowedAnyType.Count));
+  }
+
+  void Profile(llvm::FoldingSetNodeID &ID) {
+    Profile(ID, getAlternatives());
+  }
+  static void Profile(llvm::FoldingSetNodeID &ID, ArrayRef<Type> Alternatives);
+
+  static bool classof(const TypeBase *T) {
+    return T->getKind() == TypeKind::NarrowedAny;
+  }
+
+private:
+  static NarrowedAnyType *build(const ASTContext &C, ArrayRef<Type> Alts);
+
+  NarrowedAnyType(const ASTContext *ctx, ArrayRef<Type> alts,
+                  RecursiveTypeProperties properties)
+      : TypeBase(TypeKind::NarrowedAny, /*Context=*/ctx, properties) {
+    Bits.NarrowedAnyType.Count = alts.size();
+    std::uninitialized_copy(alts.begin(), alts.end(), getTrailingObjects());
+  }
+};
+BEGIN_CAN_TYPE_WRAPPER(NarrowedAnyType, Type)
+  CanTypeArrayRef getAlternatives() const {
+    return CanTypeArrayRef(getPointer()->getAlternatives());
+  }
+END_CAN_TYPE_WRAPPER(NarrowedAnyType, Type)
+
 /// ParameterizedProtocolType - A type that constrains one or more primary
 /// associated type of a protocol to a list of argument types.
 ///
@@ -8409,6 +8472,7 @@ inline bool TypeBase::isConstraintType() const {
 inline bool CanType::isConstraintTypeImpl(CanType type) {
   return (isa<ProtocolType>(type) ||
           isa<ProtocolCompositionType>(type) ||
+          isa<NarrowedAnyType>(type) ||
           isa<ParameterizedProtocolType>(type));
 }
 

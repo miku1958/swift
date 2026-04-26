@@ -447,6 +447,26 @@ private:
                       sugaredFirstType);
     }
 
+    bool visitNarrowedAnyType(CanNarrowedAnyType firstNarrowed,
+                              Type secondType,
+                              Type sugaredFirstType) {
+      if (auto secondNarrowed = secondType->getAs<NarrowedAnyType>()) {
+        auto firstAlts = firstNarrowed->getAlternatives();
+        auto secondAlts = secondNarrowed->getAlternatives();
+        if (firstAlts.size() == secondAlts.size()) {
+          for (unsigned i : indices(firstAlts)) {
+            auto firstAlt = firstAlts[i];
+            auto secondAlt = secondAlts[i];
+            if (!this->visit(CanType(firstAlt), secondAlt, firstAlt)) {
+              return false;
+            }
+          }
+          return true;
+        }
+      }
+      return mismatch(firstNarrowed.getPointer(), secondType, sugaredFirstType);
+    }
+
     bool visitParameterizedProtocolType(CanParameterizedProtocolType firstParametrizedProto,
                                         Type secondType,
                                         Type sugaredFirstType) {

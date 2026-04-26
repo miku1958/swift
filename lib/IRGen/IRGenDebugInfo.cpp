@@ -2159,6 +2159,13 @@ private:
       return getOrCreateType(ProtoDbgTy);
     }
 
+    case TypeKind::NarrowedAny: {
+      // Phase 2 placeholder: defer to the desugared `Any` debug-info path.
+      // Real DWARF for narrowed `Any` (closed-conformer table) is Phase 3.
+      auto AnyTy = ProtocolCompositionType::theAnyType(IGM.Context);
+      return getOrCreateDesugaredType(AnyTy, DbgTy);
+    }
+
     case TypeKind::ProtocolComposition: {
       auto *CompTy = BaseTy->castTo<ProtocolCompositionType>();
 

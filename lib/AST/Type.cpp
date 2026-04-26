@@ -220,6 +220,10 @@ bool CanType::isReferenceTypeImpl(CanType type, const GenericSignatureImpl *sig,
     return cast<ProtocolType>(type)->requiresClass();
   case TypeKind::ProtocolComposition:
     return cast<ProtocolCompositionType>(type)->requiresClass();
+  case TypeKind::NarrowedAny:
+    // A narrowed `Any` requires class iff *every* alternative does.
+    // For Phase 2 we don't synthesise that yet; conservatively say no.
+    return false;
   case TypeKind::ParameterizedProtocol:
     return cast<ParameterizedProtocolType>(type)->getBaseType()->requiresClass();
   case TypeKind::Existential:
@@ -408,6 +412,17 @@ ExistentialLayout CanType::getExistentialLayout() {
 
   if (auto param = dyn_cast<ParameterizedProtocolType>(ty))
     return ExistentialLayout(param);
+
+  if (auto narrowed = dyn_cast<NarrowedAnyType>(ty)) {
+    // Phase 2 placeholder: treat narrowed `Any` as if its layout were `Any`
+    // (empty protocol composition). Real layout (closed-conformer table)
+    // is Phase 3 work.
+    auto &ctx = narrowed->getASTContext();
+    auto anyType = cast<ProtocolCompositionType>(
+        ProtocolCompositionType::theAnyType(ctx)->getCanonicalType()
+            .getPointer());
+    return ExistentialLayout(CanProtocolCompositionType(anyType));
+  }
 
   auto comp = cast<ProtocolCompositionType>(ty);
   return ExistentialLayout(comp);
@@ -2017,6 +2032,16 @@ CanType TypeBase::computeCanonicalType() {
                                                     PCT->getInverses(),
                                                     PCT->hasExplicitAnyObject());
     Result = Composition.getPointer();
+    break;
+  }
+  case TypeKind::NarrowedAny: {
+    auto *NAT = cast<NarrowedAnyType>(this);
+    SmallVector<Type, 4> CanAlts;
+    for (Type t : NAT->getAlternatives())
+      CanAlts.push_back(t->getCanonicalType());
+    assert(!CanAlts.empty() && "Non-canonical empty narrowed `Any`?");
+    const ASTContext &C = CanAlts[0]->getASTContext();
+    Result = NarrowedAnyType::get(C, CanAlts).getPointer();
     break;
   }
   case TypeKind::ParameterizedProtocol: {
@@ -4088,6 +4113,23 @@ void ProtocolCompositionType::Profile(llvm::FoldingSetNodeID &ID,
     ID.AddInteger((uint8_t)IP);
 }
 
+void NarrowedAnyType::Profile(llvm::FoldingSetNodeID &ID,
+                              ArrayRef<Type> Alternatives) {
+  // Spelling matters: alternatives are uniqued by *order*, no
+  // commutativity / absorption / idempotence (per the proposal).
+  ID.AddInteger(Alternatives.size());
+  for (auto T : Alternatives)
+    ID.AddPointer(T.getPointer());
+}
+
+Type NarrowedAnyType::get(const ASTContext &C, ArrayRef<Type> Alternatives) {
+  // Per the proposal, single-alternative `T` is just `T`. There is no
+  // single-element narrowed `Any`.
+  if (Alternatives.size() == 1)
+    return Alternatives.front();
+  return build(C, Alternatives);
+}
+
 ParameterizedProtocolType::ParameterizedProtocolType(
     const ASTContext *ctx,
     ProtocolType *base, ArrayRef<Type> args,
@@ -4752,6 +4794,7 @@ ReferenceCounting TypeBase::getReferenceCounting() {
   case TypeKind::BuiltinBorrow:
   case TypeKind::Join:
   case TypeKind::Meet:
+  case TypeKind::NarrowedAny:
 #define REF_STORAGE(Name, ...) \
   case TypeKind::Name##Storage:
 #include "swift/AST/ReferenceStorage.def"

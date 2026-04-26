@@ -106,6 +106,10 @@ static bool isLeafTypeMetadata(CanType type) {
   case TypeKind::ProtocolComposition:
     return false;
 
+  // Narrowed `Any` has component (alternative) types.
+  case TypeKind::NarrowedAny:
+    return false;
+
   // Parametrized protocols have component types.
   case TypeKind::ParameterizedProtocol:
     return false;

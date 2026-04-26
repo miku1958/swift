@@ -1707,6 +1707,12 @@ void ASTMangler::appendType(Type type, GenericSignature sig,
       return appendExistentialLayout(layout, sig, forDecl);
     }
 
+    case TypeKind::NarrowedAny: {
+      // Phase 2 placeholder: mangle as the `Any` constraint. Real mangling
+      // (closed-conformer side-table, leaf-set encoding) is Phase 3 work.
+      return appendType(type->getASTContext().TheAnyType, sig, forDecl);
+    }
+
     case TypeKind::ParameterizedProtocol:
       return appendConstrainedExistential(tybase, sig, forDecl);
 

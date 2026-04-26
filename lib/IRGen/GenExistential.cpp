@@ -1567,6 +1567,14 @@ static const TypeInfo *createExistentialTypeInfo(IRGenModule &IGM, CanType T) {
     T = existential->getConstraintType()->getCanonicalType();
   }
 
+  // Phase 2 placeholder: a narrowed `Any` constraint reuses the IRGen
+  // identity of plain `Any` (an empty protocol composition). Real lowering
+  // (closed-conformer table) is Phase 3 work.
+  if (isa<NarrowedAnyType>(T)) {
+    T = ProtocolCompositionType::theAnyType(T->getASTContext())
+            ->getCanonicalType();
+  }
+
   if (isa<ProtocolType>(T) || isa<ParameterizedProtocolType>(T))
     type = IGM.createNominalType(T);
   else
@@ -1679,6 +1687,16 @@ const TypeInfo *TypeConverter::convertProtocolType(ProtocolType *T) {
 const TypeInfo *
 TypeConverter::convertProtocolCompositionType(ProtocolCompositionType *T) {
   return createExistentialTypeInfo(IGM, CanType(T));
+}
+
+const TypeInfo *
+TypeConverter::convertNarrowedAnyType(NarrowedAnyType *T) {
+  // Phase 2 placeholder: route through `Any` so the existing existential
+  // path handles layout. Real lowering (closed-conformer table) is Phase 3.
+  auto &ctx = T->getASTContext();
+  auto anyType = ProtocolCompositionType::theAnyType(ctx)
+      ->getCanonicalType();
+  return createExistentialTypeInfo(IGM, anyType);
 }
 
 const TypeInfo *
