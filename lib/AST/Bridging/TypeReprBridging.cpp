@@ -257,6 +257,15 @@ BridgedCompositionTypeRepr BridgedCompositionTypeRepr_createParsed(
       SourceRange{firstAmpLoc, types.back()->getEndLoc()});
 }
 
+BridgedNarrowedAnyTypeRepr BridgedNarrowedAnyTypeRepr_createParsed(
+    BridgedASTContext cContext, BridgedArrayRef cTypes, SourceLoc firstPipeLoc) {
+  ASTContext &context = cContext.unbridged();
+  auto types = cTypes.unbridged<TypeRepr *>();
+  return NarrowedAnyTypeRepr::create(
+      context, types, types.front()->getStartLoc(),
+      SourceRange{firstPipeLoc, types.back()->getEndLoc()});
+}
+
 BridgedCompileTimeLiteralTypeRepr
 BridgedCompileTimeLiteralTypeRepr_createParsed(BridgedASTContext cContext,
                                                BridgedTypeRepr base,

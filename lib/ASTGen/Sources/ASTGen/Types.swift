@@ -46,6 +46,8 @@ extension ASTGenVisitor {
       return self.generate(memberType: node).asTypeRepr
     case .metatypeType(let node):
       return self.generate(metatypeType: node)
+    case .narrowedAnyType(let node):
+      return self.generate(narrowedAnyType: node).asTypeRepr
     case .missingType(let node):
       return self.generate(missingType: node)
     case .namedOpaqueReturnType(let node):
@@ -259,6 +261,20 @@ extension ASTGenVisitor {
       self.ctx,
       types: types.bridgedArray(in: self),
       ampersandLoc: self.generateSourceLoc(node.elements.first?.ampersand)
+    )
+  }
+
+  func generate(narrowedAnyType node: NarrowedAnyTypeSyntax) -> BridgedNarrowedAnyTypeRepr {
+    assert(node.elements.count > 1)
+
+    let types = node.elements.lazy.map {
+      generate(type: $0.type)
+    }
+
+    return .createParsed(
+      self.ctx,
+      types: types.bridgedArray(in: self),
+      pipeLoc: self.generateSourceLoc(node.elements.first?.pipe)
     )
   }
 

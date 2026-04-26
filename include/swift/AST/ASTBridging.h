@@ -2655,6 +2655,12 @@ BridgedCompositionTypeRepr_createParsed(BridgedASTContext cContext,
                                         BridgedArrayRef types,
                                         swift::SourceLoc firstAmpLoc);
 
+SWIFT_NAME("BridgedNarrowedAnyTypeRepr.createParsed(_:types:pipeLoc:)")
+BridgedNarrowedAnyTypeRepr
+BridgedNarrowedAnyTypeRepr_createParsed(BridgedASTContext cContext,
+                                        BridgedArrayRef types,
+                                        swift::SourceLoc firstPipeLoc);
+
 SWIFT_NAME("BridgedCompileTimeLiteralTypeRepr.createParsed(_:base:specifierLoc:)")
 BridgedCompileTimeLiteralTypeRepr
 BridgedCompileTimeLiteralTypeRepr_createParsed(BridgedASTContext cContext,
