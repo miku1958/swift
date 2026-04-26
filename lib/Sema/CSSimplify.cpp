@@ -4157,6 +4157,26 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
 
   auto layout = type2->getExistentialLayout();
 
+  // Phase 2b.D: narrowed `Any` membership check. The closed conformer
+  // set replaces the usual "any conforming type" rule; type1 is
+  // accepted iff it is (recursively) one of the declared alternatives.
+  // Concrete-type1 only — a type-variable type1 would have been
+  // diverted to the unsolved-constraint path at the top of this
+  // function. Spelling-equality at the leaf is the primary check;
+  // sub-leaf relations follow normal `matchTypes` rules so that e.g.
+  // `Cat` flows into `Cat | String` even with non-trivial subtyping
+  // inside the leaf itself.
+  if (layout.isNarrowedAny()) {
+    TypeMatchOptions tryflags = subflags;
+    for (auto alt : layout.getNarrowedAlternatives()) {
+      auto trial = matchTypes(type1, alt, ConstraintKind::Subtype,
+                              tryflags, locator);
+      if (trial.isSuccess())
+        return trial;
+    }
+    return getTypeMatchFailure(locator);
+  }
+
   if (auto layoutConstraint = layout.getLayoutConstraint()) {
     if (layoutConstraint->isClass()) {
       if (kind == ConstraintKind::ConformsTo ||

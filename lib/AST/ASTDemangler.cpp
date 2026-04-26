@@ -876,6 +876,11 @@ Type ASTBuilder::createProtocolCompositionType(
   return ExistentialType::get(composition);
 }
 
+Type ASTBuilder::createNarrowedAnyType(ArrayRef<Type> alternatives) {
+  Type narrowed = NarrowedAnyType::get(Ctx, alternatives);
+  return ExistentialType::get(narrowed);
+}
+
 Type ASTBuilder::createProtocolTypeFromDecl(ProtocolDecl *protocol) {
   return protocol->getDeclaredInterfaceType();
 }

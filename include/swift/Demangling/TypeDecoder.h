@@ -930,6 +930,17 @@ protected:
     case NodeKind::ConstrainedExistentialSelf:
       return Builder.createGenericTypeParameterType(/*depth*/ 0, /*index*/ 0);
 
+    case NodeKind::NarrowedAnyType: {
+      llvm::SmallVector<BuiltType, 4> alternatives;
+      for (auto childType : *Node) {
+        auto decoded = decodeMangledType(childType, depth + 1);
+        if (decoded.isError())
+          return decoded;
+        alternatives.push_back(decoded.getType());
+      }
+      return Builder.createNarrowedAnyType(alternatives);
+    }
+
     case NodeKind::ObjectiveCProtocolSymbolicReference:
     case NodeKind::Protocol:
     case NodeKind::ProtocolSymbolicReference: {

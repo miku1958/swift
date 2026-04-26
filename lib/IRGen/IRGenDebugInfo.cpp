@@ -2160,13 +2160,32 @@ private:
     }
 
     case TypeKind::NarrowedAny: {
-      // Phase 2b.C: each NarrowedAnyType already has a distinct mangled
-      // name (alternative list is encoded into the symbol), so the DI
-      // cache no longer collides with plain `Any` and we can simply
-      // describe narrowed `Any` *as* `Any` here. Real DWARF for the
-      // closed-conformer side-table is still Phase 3 work.
-      auto AnyTy = ProtocolCompositionType::theAnyType(IGM.Context);
-      return getOrCreateDesugaredType(AnyTy, DbgTy);
+      // Emit each alternative as a member so that the DICompositeType's
+      // RawIdentifier matches the mangled name we computed above. Real
+      // DWARF for the closed-conformer side-table (run-time membership
+      // queries, narrowing operations) is still Phase 3 work.
+      auto *NarrowedTy = cast<NarrowedAnyType>(BaseTy);
+
+      llvm::TempDICompositeType FwdDecl(DBuilder.createReplaceableCompositeType(
+          llvm::dwarf::DW_TAG_structure_type, MangledName, Scope, nullptr, 0,
+          llvm::dwarf::DW_LANG_Swift, SizeInBits, AlignInBits, Flags));
+
+      SmallVector<llvm::Metadata *, 4> Members;
+      for (Type AltTy : NarrowedTy->getAlternatives()) {
+        auto AltDbgTy = DebugTypeInfo::getFromTypeInfo(
+            AltTy, IGM.getTypeInfoForUnlowered(AltTy), IGM);
+        auto *AltDITy = getOrCreateType(AltDbgTy);
+        Members.push_back(
+            DBuilder.createInheritance(FwdDecl.get(), AltDITy, 0, 0, Flags));
+      }
+
+      auto *DITy = DBuilder.createStructType(
+          Scope, MangledName, nullptr, 0, SizeInBits, AlignInBits, Flags,
+          nullptr, DBuilder.getOrCreateArray(Members),
+          llvm::dwarf::DW_LANG_Swift, /*VTableHolder=*/nullptr, MangledName);
+
+      DBuilder.replaceTemporary(std::move(FwdDecl), DITy);
+      return DITy;
     }
 
     case TypeKind::ProtocolComposition: {

@@ -1708,25 +1708,24 @@ void ASTMangler::appendType(Type type, GenericSignature sig,
     }
 
     case TypeKind::NarrowedAny: {
-      // Phase 2b.C draft mangling: encode the alternative list so different
-      // narrowed `Any` types receive distinct symbols. The previous
-      // placeholder collapsed every NarrowedAnyType to `Any`'s mangling
-      // (`$sypD`) and forced IRGenDebugInfo to manually route through the
-      // desugared form to avoid a UID cache collision.
+      // Phase 2b.C/D mangling: encode the alternative list as a standard
+      // list (separator `_` between the first two items, terminator `y`
+      // for the empty list) followed by the operator `XN`, mirroring how
+      // SIL boxes use the `_` … `Xx` pattern.
       //
-      // Prototype grammar (not yet a stable ABI; Phase 3 will pair this
-      // with a Demangler / Remangler production once NarrowedAnyType
-      // escapes Sema and starts appearing in emitted metadata):
+      //     narrowed-any-type ::= (type type+ '_' | type | 'y') 'XN'
       //
-      //     narrowed-any-type ::= type+ 'X' 'N' '_'
-      //
-      // The trailing `XN_` is a fresh slot in the special-type grammar
-      // ('X' subgrammar is the existing extension point for new
-      // type-level productions; lower-case 'N' is currently unused).
+      // Demangler dispatches on `XN` in `demangleSpecialType` and pops
+      // the type list to build a Node::Kind::NarrowedAnyType.
       auto *NA = cast<NarrowedAnyType>(tybase);
-      for (auto alt : NA->getAlternatives())
+      bool firstField = true;
+      for (auto alt : NA->getAlternatives()) {
         appendType(alt, sig, forDecl);
-      Buffer << "XN_";
+        appendListSeparator(firstField);
+      }
+      if (firstField)
+        appendOperator("y");
+      appendOperator("XN");
       return;
     }
 

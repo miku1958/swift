@@ -2587,6 +2587,12 @@ ManglingError Remangler::manglePack(Node *node, unsigned depth) {
   return ManglingError::Success;
 }
 
+ManglingError Remangler::mangleNarrowedAnyType(Node *node, unsigned depth) {
+  RETURN_IF_ERROR(mangleTypeList(node, depth + 1));
+  Buffer << "XN";
+  return ManglingError::Success;
+}
+
 ManglingError Remangler::mangleSILPackDirect(Node *node, unsigned depth) {
   RETURN_IF_ERROR(mangleTypeList(node, depth + 1));
   Buffer << "QSd";

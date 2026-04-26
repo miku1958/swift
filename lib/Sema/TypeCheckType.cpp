@@ -3022,14 +3022,15 @@ NeverNullType TypeResolver::resolveType(TypeRepr *repr,
     }
 
   case TypeReprKind::NarrowedAny: {
-    // Phase 2a: the `NarrowedAnyType` node and its registry exist
-    // (TypeNodes.def + Types.h + ASTContext factory + visitors), but
-    // resolution still desugars to plain `Any` because plumbing the new
-    // type through Sema → IRGen requires Phase 2b work (constraint-type
-    // recognition, mangling, debug-info, witness synthesis). For now we
-    // construct a `NarrowedAnyType` purely for AST inspection / future
-    // tests, then immediately discard it in favour of the existing
-    // `Any` lowering path.
+    // Phase 2b.D groundwork landed (ExistentialLayout::narrowedAlternatives,
+    // matchExistentialTypes leaf-membership rule, full Demangler /
+    // Remangler / NodePrinter / TypeDecoder coverage), but flipping
+    // resolution to `ExistentialType(NarrowedAnyType)` surfaces a
+    // further IRGen DI cascade (UID conflicts on duplicate-mangled
+    // narrowed types) that needs a focused follow-up. Until then we
+    // continue to construct the NarrowedAnyType (keeps the FoldingSet
+    // warm + exercises the demangle/remangle pipeline) and resolve
+    // user-visibly to plain `Any`.
     auto narrowed = cast<NarrowedAnyTypeRepr>(repr);
     auto &ctx = getASTContext();
     SmallVector<Type, 4> resolvedAlts;
@@ -3039,8 +3040,6 @@ NeverNullType TypeResolver::resolveType(TypeRepr *repr,
         return ErrorType::get(ctx);
       resolvedAlts.push_back(t);
     }
-    // Build the new Type node (keeps the FoldingSet warm; Phase 2b will
-    // start consuming this as the resolved type).
     (void)NarrowedAnyType::get(ctx, resolvedAlts);
     return ExistentialType::get(ctx.TheAnyType);
   }

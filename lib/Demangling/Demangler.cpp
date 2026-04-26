@@ -4000,6 +4000,19 @@ NodePointer Demangler::demangleSpecialType() {
       return createType(createWithChild(Node::Kind::ProtocolListWithAnyObject,
                                         Protocols));
     }
+    case 'N': {
+      // Narrowed `Any` type — closed conformer existential. The
+      // alternatives appear immediately before the `XN` operator as a
+      // standard list (FirstElementMarker `_` between items, `y` for
+      // empty).
+      NodePointer types = popTypeList();
+      if (!types)
+        return nullptr;
+      NodePointer narrowed = createNode(Node::Kind::NarrowedAnyType);
+      for (size_t i = 0, e = types->getNumChildren(); i < e; ++i)
+        narrowed->addChild(types->getChild(i), *this);
+      return createType(narrowed);
+    }
     case 'X':
     case 'x': {
       // SIL box types.

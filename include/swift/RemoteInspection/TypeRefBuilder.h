@@ -1282,6 +1282,16 @@ public:
                                               isClassBound);
   }
 
+  /// Reflection of a narrowed `Any` type. The closed conformer set is
+  /// not yet projected into the runtime layout; reflection treats the
+  /// type as the empty composition (`Any`) until a real reflection
+  /// surface lands. Phase 2b.D ABI placeholder.
+  BuiltType createNarrowedAnyType(llvm::ArrayRef<BuiltType> alternatives) {
+    (void)alternatives;
+    return ProtocolCompositionTypeRef::create(*this, {}, /*superclass=*/{},
+                                              /*isClassBound=*/false);
+  }
+
   const ConstrainedExistentialTypeRef *createConstrainedExistentialType(
       const TypeRef *base, llvm::ArrayRef<BuiltRequirement> constraints,
       llvm::ArrayRef<BuiltInverseRequirement> InverseRequirements) {

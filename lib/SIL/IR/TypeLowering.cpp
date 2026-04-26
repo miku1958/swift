@@ -850,8 +850,15 @@ namespace {
     RetTy visitNarrowedAnyType(CanNarrowedAnyType type,
                                AbstractionPattern origType,
                                IsTypeExpansionSensitive_t isSensitive) {
-      // Phase 2: lower as a generic existential, identical to ProtocolComposition.
-      return visitExistentialType(type, origType, isSensitive);
+      // Lower as a generic opaque existential — same shape as `Any`.
+      // The narrowed conformer set is a Sema-time construct; at SIL/IR
+      // it is indistinguishable from a plain `Any` existential.
+      // visitExistentialType expects an actual existential (its first
+      // step queries `getPreferredExistentialRepresentation`), so wrap
+      // the narrowed type in an ExistentialType before delegating.
+      auto wrapped = CanExistentialType(
+          ExistentialType::get(type)->castTo<ExistentialType>());
+      return visitExistentialType(wrapped, origType, isSensitive);
     }
     RetTy visitParameterizedProtocolType(CanParameterizedProtocolType type,
                                          AbstractionPattern origType,

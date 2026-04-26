@@ -201,6 +201,8 @@ public:
                                      bool isClassBound,
                                      bool forRequirement = true);
 
+  Type createNarrowedAnyType(ArrayRef<Type> alternatives);
+
   Type createProtocolTypeFromDecl(ProtocolDecl *protocol);
 
   Type createConstrainedExistentialType(

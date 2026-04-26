@@ -266,6 +266,7 @@ bool NodePrinter::isSimpleType(NodePointer Node) {
   case Node::Kind::Module:
   case Node::Kind::Tuple:
   case Node::Kind::Pack:
+  case Node::Kind::NarrowedAnyType:
   case Node::Kind::SILPackDirect:
   case Node::Kind::SILPackIndirect:
   case Node::Kind::ConstrainedExistentialRequirementList:
@@ -1771,6 +1772,10 @@ NodePointer NodePrinter::print(NodePointer Node, unsigned depth,
     Printer << "Pack{";
     printChildren(Node, depth, ", ");
     Printer << "}";
+    return nullptr;
+  }
+  case Node::Kind::NarrowedAnyType: {
+    printChildren(Node, depth, " | ");
     return nullptr;
   }
   case Node::Kind::SILPackDirect:
