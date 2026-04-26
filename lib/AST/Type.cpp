@@ -4130,6 +4130,25 @@ Type NarrowedAnyType::get(const ASTContext &C, ArrayRef<Type> Alternatives) {
   return build(C, Alternatives);
 }
 
+Type NarrowedAnyType::computeJoin() const {
+  auto alts = getAlternatives();
+  if (alts.empty())
+    return getASTContext().TheAnyType;
+
+  Type result = alts.front();
+  for (size_t i = 1; i < alts.size(); ++i) {
+    auto joined = Type::join(result, alts[i]);
+    if (!joined.has_value()) {
+      // The pairwise join machinery has unhandled combinations; in those
+      // cases fall back to `Any`. Phase 3 may revisit if specific
+      // combinations need a more refined join.
+      return getASTContext().TheAnyType;
+    }
+    result = joined.value();
+  }
+  return result;
+}
+
 ParameterizedProtocolType::ParameterizedProtocolType(
     const ASTContext *ctx,
     ProtocolType *base, ArrayRef<Type> args,

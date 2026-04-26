@@ -6873,6 +6873,18 @@ public:
         static_cast<size_t>(Bits.NarrowedAnyType.Count));
   }
 
+  /// Compute the join — the smallest common base type — of all the
+  /// alternatives. Returns `Any` (an empty `ProtocolCompositionType`)
+  /// if the alternatives have nothing in common.
+  ///
+  /// Defined in terms of the existing pairwise `Type::join` so that
+  /// the join lattice for narrowed `Any` is consistent with the rest
+  /// of the type system. Folding is left-associative.
+  ///
+  /// This is the primary input to Phase 3's set-membership semantics:
+  /// the body of `where T: A | B` is type-checked against this join.
+  Type computeJoin() const;
+
   void Profile(llvm::FoldingSetNodeID &ID) {
     Profile(ID, getAlternatives());
   }

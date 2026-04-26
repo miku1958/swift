@@ -6829,6 +6829,7 @@ namespace {
       printList(T->getAlternatives(), [&](auto alt, Label label) {
         printRec(alt, label);
       }, Label::optional("alternatives"));
+      printRec(T->computeJoin(), Label::optional("join"));
       printFoot();
     }
 
