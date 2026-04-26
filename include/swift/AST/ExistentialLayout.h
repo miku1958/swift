@@ -43,6 +43,7 @@ struct ExistentialLayout {
   ExistentialLayout(CanProtocolType type);
   ExistentialLayout(CanProtocolCompositionType type);
   ExistentialLayout(CanParameterizedProtocolType type);
+  ExistentialLayout(CanNarrowedAnyType type);
 
   /// The explicit superclass constraint, if any.
   Type explicitSuperclass;
@@ -115,6 +116,19 @@ struct ExistentialLayout {
   /// calling this on a temporary is likely to be incorrect.
   ArrayRef<ProtocolDecl*> getParameterizedProtocols() const && = delete;
 
+  /// True iff this layout originated from a `NarrowedAnyType`. The
+  /// alternative list returned by `getNarrowedAlternatives()` then
+  /// constrains which dynamic types can satisfy the existential — a
+  /// closed conformer set, narrower than the underlying `Any` shape.
+  bool isNarrowedAny() const { return !narrowedAlternatives.empty(); }
+
+  /// The alternative leaf types of a narrowed `Any` existential, in
+  /// declaration order. Empty for non-narrowed layouts.
+  ArrayRef<Type> getNarrowedAlternatives() const & {
+    return narrowedAlternatives;
+  }
+  ArrayRef<Type> getNarrowedAlternatives() const && = delete;
+
   LayoutConstraint getLayoutConstraint() const;
 
   /// Whether this layout has any inverses within its signature.
@@ -135,6 +149,7 @@ private:
   SmallVector<ProtocolDecl *, 4> protocols;
   SmallVector<ParameterizedProtocolType *, 4> parameterized;
   InvertibleProtocolSet inverses;
+  SmallVector<Type, 4> narrowedAlternatives;
 };
 
 }

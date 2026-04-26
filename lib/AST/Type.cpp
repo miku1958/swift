@@ -390,6 +390,21 @@ ExistentialLayout::ExistentialLayout(CanParameterizedProtocolType type)
   parameterized.push_back(type);
 }
 
+ExistentialLayout::ExistentialLayout(CanNarrowedAnyType type)
+    : ExistentialLayout(CanProtocolCompositionType(
+          cast<ProtocolCompositionType>(
+              ProtocolCompositionType::theAnyType(type->getASTContext())
+                  ->getCanonicalType()
+                  .getPointer()))) {
+  // Reuse `Any`'s composition layout as the base (no protocols, no class
+  // constraint, default-expanded inverses) so existing callers that
+  // ignore the narrowed side-table see exactly the same shape they did
+  // before. The extra closed-conformer information lives in
+  // `narrowedAlternatives`; new callers gate on `isNarrowedAny()`.
+  for (auto alt : type->getAlternatives())
+    narrowedAlternatives.push_back(alt);
+}
+
 ExistentialLayout TypeBase::getExistentialLayout() {
   return getCanonicalType().getExistentialLayout();
 }
@@ -413,16 +428,8 @@ ExistentialLayout CanType::getExistentialLayout() {
   if (auto param = dyn_cast<ParameterizedProtocolType>(ty))
     return ExistentialLayout(param);
 
-  if (auto narrowed = dyn_cast<NarrowedAnyType>(ty)) {
-    // Phase 2 placeholder: treat narrowed `Any` as if its layout were `Any`
-    // (empty protocol composition). Real layout (closed-conformer table)
-    // is Phase 3 work.
-    auto &ctx = narrowed->getASTContext();
-    auto anyType = cast<ProtocolCompositionType>(
-        ProtocolCompositionType::theAnyType(ctx)->getCanonicalType()
-            .getPointer());
-    return ExistentialLayout(CanProtocolCompositionType(anyType));
-  }
+  if (auto narrowed = dyn_cast<NarrowedAnyType>(ty))
+    return ExistentialLayout(CanNarrowedAnyType(narrowed));
 
   auto comp = cast<ProtocolCompositionType>(ty);
   return ExistentialLayout(comp);
