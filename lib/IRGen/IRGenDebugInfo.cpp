@@ -2160,8 +2160,11 @@ private:
     }
 
     case TypeKind::NarrowedAny: {
-      // Phase 2 placeholder: defer to the desugared `Any` debug-info path.
-      // Real DWARF for narrowed `Any` (closed-conformer table) is Phase 3.
+      // Phase 2b.C: each NarrowedAnyType already has a distinct mangled
+      // name (alternative list is encoded into the symbol), so the DI
+      // cache no longer collides with plain `Any` and we can simply
+      // describe narrowed `Any` *as* `Any` here. Real DWARF for the
+      // closed-conformer side-table is still Phase 3 work.
       auto AnyTy = ProtocolCompositionType::theAnyType(IGM.Context);
       return getOrCreateDesugaredType(AnyTy, DbgTy);
     }
