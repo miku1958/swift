@@ -3337,6 +3337,21 @@ directReferencesForTypeRepr(Evaluator &evaluator, ASTContext &ctx,
     return result;
   }
 
+  case TypeReprKind::NarrowedAny: {
+    auto narrowed = cast<NarrowedAnyTypeRepr>(typeRepr);
+    for (auto component : narrowed->getTypes()) {
+      auto componentResult =
+          directReferencesForTypeRepr(evaluator, ctx, component, dc, options);
+      result.first.insert(result.first.end(),
+                          componentResult.first.begin(),
+                          componentResult.first.end());
+
+      // Merge inverses.
+      result.second.insertAll(componentResult.second);
+    }
+    return result;
+  }
+
   case TypeReprKind::QualifiedIdent:
   case TypeReprKind::UnqualifiedIdent:
     return directReferencesForDeclRefTypeRepr(

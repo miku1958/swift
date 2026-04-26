@@ -2360,6 +2360,14 @@ bool Traversal::visitCompositionTypeRepr(CompositionTypeRepr *T) {
   return false;
 }
 
+bool Traversal::visitNarrowedAnyTypeRepr(NarrowedAnyTypeRepr *T) {
+  for (auto elem : T->getTypes()) {
+    if (doIt(elem))
+      return true;
+  }
+  return false;
+}
+
 bool Traversal::visitMetatypeTypeRepr(MetatypeTypeRepr *T) {
   return doIt(T->getBase());
 }

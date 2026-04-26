@@ -98,6 +98,11 @@ protected:
     NumTypes : 32
   );
 
+  SWIFT_INLINE_BITFIELD_FULL(NarrowedAnyTypeRepr, TypeRepr, 32,
+    : NumPadBits,
+    NumTypes : 32
+  );
+
   SWIFT_INLINE_BITFIELD_FULL(SILBoxTypeRepr, TypeRepr, 32,
     NumGenericArgs : NumPadBits,
     NumFields : 32
@@ -1077,6 +1082,54 @@ private:
   friend class TypeRepr;
 };
 
+/// A narrowed-`Any` type: a closed-class existential whose dynamic type is
+/// one of the listed alternatives.
+/// \code
+///   Int | String
+/// \endcode
+class NarrowedAnyTypeRepr final : public TypeRepr,
+    private llvm::TrailingObjects<NarrowedAnyTypeRepr, TypeRepr*> {
+  friend TrailingObjects;
+  SourceLoc FirstTypeLoc;
+  SourceRange Range;
+
+  NarrowedAnyTypeRepr(ArrayRef<TypeRepr *> Types,
+                      SourceLoc FirstTypeLoc,
+                      SourceRange Range)
+      : TypeRepr(TypeReprKind::NarrowedAny), FirstTypeLoc(FirstTypeLoc),
+        Range(Range) {
+    Bits.NarrowedAnyTypeRepr.NumTypes = Types.size();
+    std::uninitialized_copy(Types.begin(), Types.end(),
+                            getTrailingObjects());
+  }
+
+public:
+  ArrayRef<TypeRepr *> getTypes() const {
+    return getTrailingObjects(
+        static_cast<size_t>(Bits.NarrowedAnyTypeRepr.NumTypes));
+  }
+  SourceLoc getSourceLoc() const { return FirstTypeLoc; }
+  SourceRange getNarrowingRange() const { return Range; }
+
+  static NarrowedAnyTypeRepr *create(const ASTContext &C,
+                                     ArrayRef<TypeRepr *> Types,
+                                     SourceLoc FirstTypeLoc,
+                                     SourceRange Range);
+
+  static bool classof(const TypeRepr *T) {
+    return T->getKind() == TypeReprKind::NarrowedAny;
+  }
+  static bool classof(const NarrowedAnyTypeRepr *T) { return true; }
+
+private:
+  SourceLoc getStartLocImpl() const { return FirstTypeLoc; }
+  SourceLoc getLocImpl() const { return Range.Start; }
+  SourceLoc getEndLocImpl() const { return Range.End; }
+  void printImpl(ASTPrinter &Printer, const PrintOptions &opts,
+                 NonRecursivePrintOptions nrOpts) const;
+  friend class TypeRepr;
+};
+
 /// A 'metatype' type.
 /// \code
 ///   Foo.Type
@@ -1701,6 +1754,7 @@ inline bool TypeRepr::isSimple() const {
   case TypeReprKind::Function:
   case TypeReprKind::Ownership:
   case TypeReprKind::Composition:
+  case TypeReprKind::NarrowedAny:
   case TypeReprKind::OpaqueReturn:
   case TypeReprKind::NamedOpaqueReturn:
   case TypeReprKind::Existential:

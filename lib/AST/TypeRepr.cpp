@@ -841,6 +841,22 @@ void CompositionTypeRepr::printImpl(ASTPrinter &Printer,
   }
 }
 
+NarrowedAnyTypeRepr *NarrowedAnyTypeRepr::create(const ASTContext &C,
+                                                 ArrayRef<TypeRepr *> Types,
+                                                 SourceLoc FirstTypeLoc,
+                                                 SourceRange Range) {
+  auto size = totalSizeToAlloc<TypeRepr*>(Types.size());
+  auto mem = C.Allocate(size, alignof(NarrowedAnyTypeRepr));
+  return new (mem) NarrowedAnyTypeRepr(Types, FirstTypeLoc, Range);
+}
+
+void NarrowedAnyTypeRepr::printImpl(ASTPrinter &Printer,
+                                    const PrintOptions &Opts,
+                                    NonRecursivePrintOptions nrOpts) const {
+  interleave(getTypes(), [&](TypeRepr *T) { printTypeRepr(T, Printer, Opts);},
+             [&] { Printer << " | "; });
+}
+
 void MetatypeTypeRepr::printImpl(ASTPrinter &Printer,
                                  const PrintOptions &Opts,
                                  NonRecursivePrintOptions nrOpts) const {

@@ -4851,6 +4851,14 @@ public:
     printFoot();
   }
 
+  void visitNarrowedAnyTypeRepr(NarrowedAnyTypeRepr *T, Label label) {
+    printCommon("type_narrowed_any", label);
+    printList(T->getTypes(), [&](auto elem, Label label) {
+      printRec(elem, label);
+    }, Label::optional("types"));
+    printFoot();
+  }
+
   void visitMetatypeTypeRepr(MetatypeTypeRepr *T, Label label) {
     printCommon("type_metatype", label);
     printRec(T->getBase(), Label::optional("base"));

@@ -986,13 +986,43 @@ Parser::parseTypeSimpleOrComposition(Diag<> MessageID, ParseTypeReason reason) {
     return type;
   };
   
+  // Helper: after a single `simple` or composition type is parsed, check for
+  // a narrowed-`Any` `|` chain and consume it as a flat n-ary list.
+  auto wrapNarrowedAnyIfPresent =
+      [&](ParserResult<TypeRepr> head) -> ParserResult<TypeRepr> {
+    if (!Tok.isContextualPunctuator("|"))
+      return head;
+
+    SmallVector<TypeRepr *, 4> alternatives;
+    ParserStatus status(head);
+    SourceLoc firstLoc = head.get()->getStartLoc();
+    SourceLoc firstPipeLoc = Tok.getLoc();
+    alternatives.push_back(head.get());
+
+    do {
+      consumeToken(); // consume '|'
+
+      ParserResult<TypeRepr> alt =
+          parseTypeSimple(diag::expected_identifier_for_type, reason);
+      if (alt.hasCodeCompletion())
+        return makeParserCodeCompletionResult<TypeRepr>();
+      status |= alt;
+      if (alt.isNonNull())
+        alternatives.push_back(alt.get());
+    } while (Tok.isContextualPunctuator("|"));
+
+    auto *narrowed = NarrowedAnyTypeRepr::create(
+        Context, alternatives, firstLoc, {firstPipeLoc, PreviousLoc});
+    return makeParserResult(status, narrowed);
+  };
+
   // Parse the first type
   ParserResult<TypeRepr> FirstType = parseTypeSimple(MessageID, reason);
   if (FirstType.isNull())
     return FirstType;
   if (!Tok.isContextualPunctuator("&")) {
-    return makeParserResult(ParserStatus(FirstType),
-                            applyOpaque(FirstType.get()));
+    return wrapNarrowedAnyIfPresent(makeParserResult(
+        ParserStatus(FirstType), applyOpaque(FirstType.get())));
   }
 
   SmallVector<TypeRepr *, 4> Types;
@@ -1054,8 +1084,11 @@ Parser::parseTypeSimpleOrComposition(Diag<> MessageID, ParseTypeReason reason) {
     addType(ty.getPtrOrNull());
   } while (Tok.isContextualPunctuator("&"));
 
-  return makeParserResult(Status, applyOpaque(CompositionTypeRepr::create(
-    Context, Types, FirstTypeLoc, {FirstAmpersandLoc, PreviousLoc})));
+  auto compositionResult = makeParserResult(
+      Status,
+      applyOpaque(CompositionTypeRepr::create(
+          Context, Types, FirstTypeLoc, {FirstAmpersandLoc, PreviousLoc})));
+  return wrapNarrowedAnyIfPresent(compositionResult);
 }
 
 ParserResult<TypeRepr> Parser::parseAnyType() {

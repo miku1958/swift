@@ -3021,6 +3021,19 @@ NeverNullType TypeResolver::resolveType(TypeRepr *repr,
       return resolveCompositionType(cast<CompositionTypeRepr>(repr), options);
     }
 
+  case TypeReprKind::NarrowedAny: {
+    // Phase 1 PoC: resolve a narrowed `Any` (e.g. `Int | String`) to plain
+    // `Any` so the existing existential machinery handles values uniformly.
+    // Real subtyping/lattice semantics will land in a later phase.
+    auto narrowed = cast<NarrowedAnyTypeRepr>(repr);
+    // Resolve each alternative for diagnostics / name lookup side-effects.
+    for (auto *member : narrowed->getTypes()) {
+      (void)resolveType(member, options);
+    }
+    auto &ctx = getASTContext();
+    return ExistentialType::get(ctx.TheAnyType);
+  }
+
   case TypeReprKind::Metatype:
     return resolveMetatypeType(cast<MetatypeTypeRepr>(repr), options);
 
@@ -7005,6 +7018,7 @@ private:
     case TypeReprKind::Function:
     case TypeReprKind::Ownership:
     case TypeReprKind::Composition:
+    case TypeReprKind::NarrowedAny:
     case TypeReprKind::OpaqueReturn:
     case TypeReprKind::NamedOpaqueReturn:
     case TypeReprKind::Existential:
