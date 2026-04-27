@@ -3145,6 +3145,15 @@ ExtendedTypeRequest::evaluate(Evaluator &eval, ExtensionDecl *ext) const {
       !extendedType->is<ParameterizedProtocolType>()) {
     diags.diagnose(ext->getLoc(), diag::non_nominal_extension, extendedType)
          .highlight(extendedRepr->getSourceRange());
+    // Phase 3.F slice 19: if the user is trying to extend a narrowed-Any,
+    // give an actionable hint pointing at per-leaf extensions or generic
+    // constraints rather than just the generic "non-nominal" wall.
+    Type peeled = extendedType;
+    if (auto *ext = peeled->getAs<ExistentialType>())
+      peeled = ext->getConstraintType();
+    if (peeled->is<NarrowedAnyType>())
+      diags.diagnose(ext->getLoc(),
+                     diag::narrowed_any_extension_unsupported);
     return error();
   }
 

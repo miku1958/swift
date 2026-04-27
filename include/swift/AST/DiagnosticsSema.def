@@ -2811,6 +2811,12 @@ ERROR(inverse_type_not_invertible,none,
 // Extensions
 GROUPED_ERROR(non_nominal_extension,NominalTypes,none,
       "non-nominal type %0 cannot be extended", (Type))
+NOTE(narrowed_any_extension_unsupported,none,
+     "narrowed-Any types are existentials with a closed leaf set; "
+     "extend each leaf type individually, or write a generic "
+     "function with a `where T: A | B` constraint to add behaviour "
+     "uniformly across leaves",
+     ())
 WARNING(composition_in_extended_type,none,
         "extending a protocol composition is not supported; extending %0 "
         "instead", (Type))
