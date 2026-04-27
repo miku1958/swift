@@ -129,6 +129,12 @@ swift::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
     // non-self-conf protocols (BitwiseCopyable, ...) keep their
     // existing forInvalid behavior — broadening would require each
     // protocol's own synth + leaf-conformance check.
+    //
+    // Hashable specifically needs (a) base-protocol WT entry
+    // pointing to narrowed-Any:Equatable + (b) real per-leaf
+    // dispatch for `hash(into:)` (today's trap-stub-only WT crashes
+    // before reaching the trap because Set/Dict reads the
+    // base-protocol slot). Tracked as Phase 3.F slice 7 in todo.
     if (protocol->isSpecificProtocol(KnownProtocolKind::Equatable)) {
       Type peeled = getConstraintType();
       if (auto *ext = peeled->getAs<ExistentialType>())
