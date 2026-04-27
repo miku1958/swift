@@ -1454,19 +1454,23 @@ Pattern *TypeChecker::coercePatternToType(
           peeledTo = ext->getConstraintType();
 
         bool emit = false;
+        bool emitWidening = false;
         if (auto *naTo = peeledTo->getAs<NarrowedAnyType>()) {
-          // Both sides narrowed-Any: warn iff leaf sets are disjoint.
-          llvm::SmallPtrSet<TypeBase *, 4> srcLeaves;
-          for (auto leaf : na->getAlternatives())
-            srcLeaves.insert(leaf->getCanonicalType().getPointer());
-          bool overlap = false;
-          for (auto leaf : naTo->getAlternatives()) {
-            if (srcLeaves.count(leaf->getCanonicalType().getPointer())) {
-              overlap = true;
-              break;
-            }
+          // Both sides narrowed-Any: warn on disjoint OR widening.
+          llvm::SmallPtrSet<TypeBase *, 4> tgtLeaves;
+          for (auto leaf : naTo->getAlternatives())
+            tgtLeaves.insert(leaf->getCanonicalType().getPointer());
+          unsigned overlap = 0;
+          for (auto leaf : na->getAlternatives()) {
+            if (tgtLeaves.count(leaf->getCanonicalType().getPointer()))
+              ++overlap;
           }
-          emit = !overlap;
+          unsigned srcSize = na->getAlternatives().size();
+          if (overlap == 0)
+            emit = true;            // disjoint
+          else if (overlap == srcSize)
+            emitWidening = true;    // every src leaf is in tgt
+          // else: partial overlap — runtime decides
         } else if (!peeledTo->isExistentialType() && !peeledTo->hasArchetype()) {
           auto peeledToCanon = peeledTo->getCanonicalType();
           bool isLeaf = false;
@@ -1491,6 +1495,10 @@ Pattern *TypeChecker::coercePatternToType(
           diags.diagnose(IP->getLoc(),
                          diag::narrowed_any_cast_nonleaf_leaves,
                          type, leafOS.str());
+        } else if (emitWidening) {
+          diags.diagnose(IP->getLoc(),
+                         diag::narrowed_any_cast_widening_always_succeeds,
+                         type, IP->getCastType(), 0);
         }
       }
     }

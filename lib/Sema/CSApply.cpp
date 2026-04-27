@@ -4176,27 +4176,39 @@ namespace {
       if (auto *na = peeledFrom->getAs<NarrowedAnyType>()) {
         if (peeledTo->isExistentialType() || peeledTo->hasArchetype()) {
           // Generic existential / opaque target — runtime must inspect.
-          // Exception: narrowed-Any-to-narrowed-Any with disjoint leaf
-          // sets is also statically empty, so check that case below.
+          // Exception: narrowed-Any-to-narrowed-Any. Compare leaf sets.
           if (auto *naTo = peeledTo->getAs<NarrowedAnyType>()) {
-            llvm::SmallPtrSet<TypeBase *, 4> srcLeaves;
-            for (auto leaf : na->getAlternatives())
-              srcLeaves.insert(leaf->getCanonicalType().getPointer());
-            for (auto leaf : naTo->getAlternatives()) {
-              if (srcLeaves.count(leaf->getCanonicalType().getPointer()))
-                return; // overlap exists, runtime will sort it out
+            llvm::SmallPtrSet<TypeBase *, 4> tgtLeaves;
+            for (auto leaf : naTo->getAlternatives())
+              tgtLeaves.insert(leaf->getCanonicalType().getPointer());
+            unsigned overlap = 0;
+            for (auto leaf : na->getAlternatives()) {
+              if (tgtLeaves.count(leaf->getCanonicalType().getPointer()))
+                ++overlap;
             }
-            // No overlap — statically empty.
-            ctx.Diags.diagnose(expr->getLoc(),
-                               diag::narrowed_any_cast_nonleaf,
-                               fromType, toType, diagSelect);
-            llvm::SmallString<128> leafBuf;
-            llvm::raw_svector_ostream leafOS(leafBuf);
-            llvm::interleaveComma(na->getAlternatives(), leafOS,
-                                  [&](Type leaf) { leaf->print(leafOS); });
-            ctx.Diags.diagnose(expr->getLoc(),
-                               diag::narrowed_any_cast_nonleaf_leaves,
-                               fromType, leafOS.str());
+            unsigned srcSize = na->getAlternatives().size();
+            if (overlap == 0) {
+              // Disjoint — statically empty.
+              ctx.Diags.diagnose(expr->getLoc(),
+                                 diag::narrowed_any_cast_nonleaf,
+                                 fromType, toType, diagSelect);
+              llvm::SmallString<128> leafBuf;
+              llvm::raw_svector_ostream leafOS(leafBuf);
+              llvm::interleaveComma(na->getAlternatives(), leafOS,
+                                    [&](Type leaf) { leaf->print(leafOS); });
+              ctx.Diags.diagnose(expr->getLoc(),
+                                 diag::narrowed_any_cast_nonleaf_leaves,
+                                 fromType, leafOS.str());
+              return;
+            }
+            if (overlap == srcSize) {
+              // Every src leaf is in the tgt set — cast always succeeds.
+              ctx.Diags.diagnose(expr->getLoc(),
+                                 diag::narrowed_any_cast_widening_always_succeeds,
+                                 fromType, toType, diagSelect);
+              return;
+            }
+            // Partial overlap — runtime decides per dynamic value.
             return;
           }
           return;

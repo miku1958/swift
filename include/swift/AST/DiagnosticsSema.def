@@ -1520,6 +1520,12 @@ WARNING(narrowed_any_cast_nonleaf_to,none,
         (Type, Type, unsigned))
 NOTE(narrowed_any_cast_nonleaf_leaves,none,
      "valid leaves of %0 are: %1", (Type, StringRef))
+WARNING(narrowed_any_cast_widening_always_succeeds,none,
+        "%select{cast|cast|'is' check}2 from %0 to %1 always "
+        "%select{succeeds|succeeds|evaluates to true}2 because every "
+        "leaf of %0 is in the closed leaf set of %1; "
+        "consider using %select{'as'|'as'|'true'}2",
+        (Type, Type, unsigned))
 NOTE(downcast_to_unrelated_fixit,none,
      "did you mean to call %0 with '()'?", (Identifier))
 ERROR(optional_chain_noop,none,
