@@ -6467,19 +6467,45 @@ SILValue SILGenFunction::emitApplyWithRethrow(SILLocation loc, SILValue fn,
 
       // If we need to convert the error type, do so now.
       if (innerErrorType != outerErrorType) {
-        assert(outerErrorType == SILType::getExceptionType(getASTContext()));
+        // Phase 3.E: function-type throws widening — outer thunk's thrown
+        // type may be a narrowed-Any (e.g. `throws(NetErr | DecodeErr)`)
+        // and the inner callee throws one of the alternatives (e.g.
+        // `throws(NetErr)`). Sema accepted this via leaf-membership in
+        // matchExistentialTypes; SILGen has to walk the outer existential
+        // layout and supply a conformance for each protocol — for Any-
+        // shaped narrowed-Any the layout still defaults in Copyable /
+        // Escapable / etc., so we collect via the standard path rather
+        // than hard-coding `Error` like the original code did.
+        bool outerIsNarrowedAny = false;
+        {
+          auto outerCanType = outerErrorType.getASTType();
+          auto inner = outerCanType;
+          if (auto *ext = outerCanType->getAs<ExistentialType>())
+            inner = ext->getConstraintType()->getCanonicalType();
+          outerIsNarrowedAny = inner->is<NarrowedAnyType>();
+        }
+        assert(outerErrorType == SILType::getExceptionType(getASTContext()) ||
+               outerIsNarrowedAny);
 
-        ProtocolConformanceRef conformances[1] = {
-          checkConformance(innerError->getType().getASTType(),
-                           getASTContext().getErrorDecl())
-        };
+        ArrayRef<ProtocolConformanceRef> conformances;
+        if (outerIsNarrowedAny) {
+          conformances = collectExistentialConformances(
+              innerError->getType().getASTType(),
+              outerErrorType.getASTType());
+        } else {
+          ProtocolConformanceRef one[1] = {
+            checkConformance(innerError->getType().getASTType(),
+                             getASTContext().getErrorDecl())
+          };
+          conformances = getASTContext().AllocateCopy(ArrayRef<ProtocolConformanceRef>(one, 1));
+        }
 
         outerError = emitExistentialErasure(
             loc,
             innerErrorType.getASTType(),
             getTypeLowering(innerErrorType),
             getTypeLowering(outerErrorType),
-            getASTContext().AllocateCopy(conformances),
+            conformances,
             SGFContext(),
             [&](SGFContext C) -> ManagedValue {
               if (innerError->getType().isAddress()) {
