@@ -10495,13 +10495,23 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
     }
   }
 
-  // Narrowed-Any base: an unqualified member like `.a(7)` against
+  // Narrowed-Any *metatype* base: an unqualified leading-dot member
+  // like `.a(7)` / `.init(99)` / `.zero` against
   // `let v: E | String = .a(7)` cannot resolve directly against the
-  // existential — recurse through each declared alternative and union
-  // the viable / unviable results. The constraint solver then picks
-  // a leaf where the lookup succeeds (or reports the union of
-  // failures otherwise).
-  {
+  // existential metatype — recurse through each declared alternative
+  // and union the viable / unviable results. The constraint solver
+  // then picks the leaf whose metatype owns the member.
+  //
+  // We only do this when the receiver is a metatype, *not* on
+  // instance receivers. Instance-side member access on narrowed-Any
+  // is a structural-union question the proposal explicitly rejects:
+  // `v.method()` where v is narrowed-Any requires the user to write
+  // `(v as? Leaf)?.method()` first. Recursing per-leaf for instance
+  // members would silently bind the receiver to one leaf and then
+  // crash in CSApply (no narrowed-Any → leaf coercion path) or, in
+  // the all-leaves-have-it case, behave like a structural union —
+  // both are wrong per the proposal.
+  if (baseObjTy->is<AnyMetatypeType>()) {
     Type peeled = instanceTy;
     if (auto *ext = peeled->getAs<ExistentialType>())
       peeled = ext->getConstraintType();
@@ -10509,12 +10519,7 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
       MemberLookupResult merged;
       merged.OverallResult = MemberLookupResult::HasResults;
       for (Type alt : na->getAlternatives()) {
-        // If the original base was a metatype, route the recursive
-        // call against the alternative's metatype so the per-leaf
-        // lookup sees the same kind of receiver.
-        Type altBase = baseObjTy->is<AnyMetatypeType>()
-                           ? Type(MetatypeType::get(alt))
-                           : alt;
+        Type altBase = Type(MetatypeType::get(alt));
         auto altResult = performMemberLookup(constraintKind, memberName,
                                              altBase, functionRefInfo,
                                              memberLocator,
