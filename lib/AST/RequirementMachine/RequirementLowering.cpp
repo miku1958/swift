@@ -576,6 +576,27 @@ void swift::rewriting::realizeTypeRequirement(DeclContext *dc,
     }
   }
 
+  // Phase 3.C (prototype): desugar `where T: A | B` to `where T == A | B`.
+  // The proposal's set-membership reading would let T be either a leaf
+  // or the union itself; that needs disjunctive requirements which
+  // Swift's generic system doesn't model. As a prototype affordance,
+  // accept the `T:` spelling and bind T to the narrowed `Any` itself.
+  // Callers can still pass leaves via the call-site leaf-injection
+  // rule. The body sees T as the union (the "join shape" path from
+  // proposal §Issue 6).
+  bool constraintIsNarrowedAny = false;
+  if (auto *ext = constraintType->getAs<ExistentialType>())
+    constraintIsNarrowedAny = ext->getConstraintType()->is<NarrowedAnyType>();
+  else
+    constraintIsNarrowedAny = constraintType->is<NarrowedAnyType>();
+
+  if (constraintIsNarrowedAny) {
+    result.push_back({Requirement(RequirementKind::SameType,
+                                  subjectType, constraintType),
+                      loc});
+    return;
+  }
+
   if (constraintType->isConstraintType()) {
     result.push_back({Requirement(RequirementKind::Conformance,
                                   subjectType, constraintType),
