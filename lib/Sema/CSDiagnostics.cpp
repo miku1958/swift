@@ -746,6 +746,26 @@ bool MissingConformanceFailure::diagnoseTypeCannotConform(
   if (!emittedSpecializedNote)
     emitDiagnostic(diag::only_concrete_types_conform_to_protocols);
 
+  // Phase 3.F slice 20 extension hint: when nonConformingType is a
+  // narrowed-Any whose builtin protocol synth requires every leaf to
+  // conform, point the user at the specific blocking leaf. Same hint
+  // wording as the binop and Set/Dict paths.
+  Type peeled = nonConformingType;
+  if (auto *ext = peeled->getAs<ExistentialType>())
+    peeled = ext->getConstraintType();
+  if (auto *na = peeled->getAs<NarrowedAnyType>()) {
+    if (auto *protoType = protocolType->getAs<ProtocolType>()) {
+      auto *protoDecl = protoType->getDecl();
+      for (auto leaf : na->getAlternatives()) {
+        if (!checkConformance(leaf, protoDecl)) {
+          emitDiagnostic(diag::narrowed_any_leaf_missing_conformance,
+                         nonConformingType, leaf, protoDecl->getName());
+          break;
+        }
+      }
+    }
+  }
+
   if (auto *OTD = dyn_cast<OpaqueTypeDecl>(AffectedDecl)) {
     auto *namingDecl = OTD->getNamingDecl();
     if (auto *repr = namingDecl->getOpaqueResultTypeRepr()) {
