@@ -10533,6 +10533,48 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
       }
       return merged;
     }
+  } else {
+    // Narrowed-Any *instance* base: per-leaf members are visible only
+    // after `as?`-narrowing (the proposal explicitly rejects
+    // structural-union dispatch). But silently letting the lookup
+    // come up empty here lets the constraint solver pick up leaf
+    // extensions from outer scope, fail to bind the receiver, and
+    // then produce "failed to produce diagnostic". Run the per-leaf
+    // lookup just to *find* candidates, then mark them as unviable
+    // with `UR_UnavailableInExistential` so the standard
+    // missing-member fix path produces a clean diagnostic.
+    Type peeled = instanceTy;
+    if (auto *ext = peeled->getAs<ExistentialType>())
+      peeled = ext->getConstraintType();
+    if (auto *na = peeled->getAs<NarrowedAnyType>()) {
+      MemberLookupResult merged;
+      bool foundAnyLeafMember = false;
+      for (Type alt : na->getAlternatives()) {
+        auto altResult = performMemberLookup(constraintKind, memberName,
+                                             alt, functionRefInfo,
+                                             memberLocator,
+                                             includeInaccessibleMembers);
+        // Mark every candidate (viable on the leaf) as unviable on the
+        // narrowed-Any: requires `as?`-narrowing first.
+        for (auto &c : altResult.ViableCandidates) {
+          merged.UnviableCandidates.push_back(c);
+          merged.UnviableReasons.push_back(
+              MemberLookupResult::UR_UnavailableInExistential);
+          foundAnyLeafMember = true;
+        }
+        // Pass through anything already unviable on the leaf.
+        for (size_t i = 0; i < altResult.UnviableCandidates.size(); ++i) {
+          merged.UnviableCandidates.push_back(altResult.UnviableCandidates[i]);
+          merged.UnviableReasons.push_back(altResult.UnviableReasons[i]);
+        }
+      }
+      if (foundAnyLeafMember) {
+        merged.OverallResult = MemberLookupResult::HasResults;
+        return merged;
+      }
+      // No leaf has the member — fall through to default lookup so
+      // standard "no member" diagnostic fires.
+    }
   }
 
   // Okay, start building up the result list.
