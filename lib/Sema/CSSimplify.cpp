@@ -11393,6 +11393,17 @@ static ConstraintFix *validateInitializerRef(ConstraintSystem &cs,
     // metatype to witness it.
   } else if (baseType->is<MetatypeType>() &&
              instanceType->isExistentialType()) {
+    // Narrowed-Any: `.init(...)` against `(A | B).Type` is OK as long
+    // as the resolved init belongs to one of the declared leaves. The
+    // per-leaf member-lookup recursion already filters viable inits
+    // to those that exist on a leaf, and the choice's parent context
+    // identifies which leaf owns it. Suppress the
+    // "cannot construct an existential" fix in that case.
+    Type peeled = instanceType;
+    if (auto *ext = peeled->getAs<ExistentialType>())
+      peeled = ext->getConstraintType();
+    if (peeled->is<NarrowedAnyType>())
+      return nullptr;
     return AllowInvalidInitRef::onProtocolMetatype(
         cs, baseType, init, isStaticallyDerived, baseRange, locator);
   }
