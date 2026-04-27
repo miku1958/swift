@@ -1421,6 +1421,60 @@ public:
   }
 };
 
+/// Phase 3.F slice 2+3: conformance info for a narrowed-Any-dispatch
+/// builtin conformance. Instead of returning a static witness-table
+/// symbol (which has no body — slice 2 SILGen only emits an empty
+/// SILWitnessTable today), `getTable` materializes the witness table
+/// at runtime via `swift_getWitnessTable(descriptor, selfMetadata,
+/// nullptr)`. The `MR` protocol conformance descriptor is emitted by
+/// the slice 4 mangler and serves as the lookup key.
+class NarrowedAnyDispatchConformanceInfo : public ConformanceInfo {
+  friend ProtocolInfo;
+
+  const BuiltinProtocolConformance *Conformance;
+
+public:
+  NarrowedAnyDispatchConformanceInfo(const BuiltinProtocolConformance *C)
+      : Conformance(C) {
+    assert(C->getBuiltinConformanceKind() ==
+               BuiltinConformanceKind::NarrowedAnyDispatch &&
+           "wrong builtin conformance kind for runtime-dispatch info");
+  }
+
+  llvm::Value *getTable(IRGenFunction &IGF,
+                        llvm::Value **conformingMetadataCache) const override {
+    auto &IGM = IGF.IGM;
+    auto *descriptor =
+        IGM.getAddrOfProtocolConformanceDescriptor(Conformance);
+
+    // Get the runtime metadata for the conforming type.
+    llvm::Value *metadata =
+        conformingMetadataCache && *conformingMetadataCache
+            ? *conformingMetadataCache
+            : IGF.emitTypeMetadataRef(
+                  Conformance->getType()->getCanonicalType());
+    if (conformingMetadataCache)
+      *conformingMetadataCache = metadata;
+
+    // swift_getWitnessTable(descriptor, selfMetadata, instantiationArgs)
+    // — narrowed-Any-dispatch never has instantiation args, pass null.
+    auto *nullArgs =
+        llvm::Constant::getNullValue(IGM.Int8PtrPtrTy);
+    auto call = IGF.Builder.CreateCall(
+        IGM.getGetWitnessTableFunctionPointer(),
+        {descriptor, metadata, nullArgs});
+    call->setCallingConv(IGM.DefaultCC);
+    call->setDoesNotThrow();
+    return call;
+  }
+
+  llvm::Constant *tryGetConstantTable(IRGenModule &IGM,
+                                      CanType conformingType) const override {
+    // Cannot precompute — runtime lookup required.
+    return nullptr;
+  }
+};
+
 /// Conformance info for a witness table that is (or may be) dependent.
 class AccessorConformanceInfo : public ConformanceInfo {
   friend ProtocolInfo;
@@ -2660,6 +2714,20 @@ IRGenModule::getConformanceInfo(const ProtocolDecl *protocol,
     return *found;
 
   const ConformanceInfo *info;
+
+  // Phase 3.F slice 2+3: route narrowed-Any-dispatch builtin
+  // conformances through the runtime-lookup info so witness_method
+  // calls go via swift_getWitnessTable instead of trying to load a
+  // statically-defined witness table that doesn't exist yet
+  // (slice 2 SILGen only emits an empty SILWitnessTable).
+  if (auto *bc = dyn_cast<BuiltinProtocolConformance>(conformance)) {
+    if (bc->getBuiltinConformanceKind() ==
+        BuiltinConformanceKind::NarrowedAnyDispatch) {
+      info = new NarrowedAnyDispatchConformanceInfo(bc);
+      Conformances.try_emplace(conformance, info);
+      return *info;
+    }
+  }
 
   auto *specConf = conformance;
   if (auto *inheritedC = dyn_cast<InheritedProtocolConformance>(conformance)) {
