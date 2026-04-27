@@ -892,6 +892,200 @@ static bool tryEmitNarrowedAnyEquatableEqDispatch(
   return true;
 }
 
+/// Phase 3.F slice 11: synthesize per-leaf dispatch for
+/// `Comparable.<` on a narrowed-Any type. Same shape as
+/// Equatable.== (static op, 3 args, returns Bool):
+///   - Both leaves match: dispatch to leaf's `<`, return its result
+///   - Different leaves: returns true iff lhs's leaf-index <
+///     rhs's leaf-index (declaration order). This gives a stable
+///     total order on the closed leaf set; together with same-leaf
+///     `<` it forms a strict total order across narrowed-Any.
+static bool tryEmitNarrowedAnyComparableLessThanDispatch(
+    SILGenModule &SGM, SILFunction *thunk, SILBasicBlock *entry,
+    BuiltinProtocolConformance *conformance, SILDeclRef reqRef) {
+  ASTContext &ctx = SGM.getASTContext();
+  auto *comparable = ctx.getProtocol(KnownProtocolKind::Comparable);
+  if (conformance->getProtocol() != comparable)
+    return false;
+
+  auto *funcReq = dyn_cast_or_null<AbstractFunctionDecl>(reqRef.getDecl());
+  if (!funcReq || !funcReq->isOperator() ||
+      funcReq->getBaseIdentifier().str() != "<")
+    return false;
+
+  Type peeled = conformance->getType();
+  if (auto *ext = peeled->getAs<ExistentialType>())
+    peeled = ext->getConstraintType();
+  auto *narrowedAny = peeled->getAs<NarrowedAnyType>();
+  if (!narrowedAny)
+    return false;
+  auto leaves = narrowedAny->getAlternatives();
+  if (leaves.empty())
+    return false;
+
+  auto loc = RegularLocation::getModuleLocation();
+
+  auto fnArgs = entry->getArguments();
+  assert(fnArgs.size() == 3 &&
+         "Comparable.< thunk should have lhs/rhs/selfMeta args");
+  SILValue lhsAddr = fnArgs[0];
+  SILValue rhsAddr = fnArgs[1];
+
+  auto *boolDecl = ctx.getBoolDecl();
+  auto silBoolTy = SILType::getPrimitiveObjectType(
+      boolDecl->getDeclaredInterfaceType()->getCanonicalType());
+  auto i1Ty = SILType::getBuiltinIntegerType(1, ctx);
+
+  auto sig = thunk->getLoweredFunctionType()->getInvocationGenericSignature();
+  auto srcArchetype = thunk->getGenericEnvironment()
+      ->mapTypeIntoEnvironment(sig.getGenericParams()[0])
+      ->getCanonicalType();
+
+  // Exit block — phi takes Bool result.
+  auto *exitBB = thunk->createBasicBlock();
+  auto *resultPhi =
+      exitBB->createPhiArgument(silBoolTy, OwnershipKind::None);
+  {
+    SILBuilder B(exitBB);
+    B.createReturn(loc, resultPhi);
+  }
+
+  // True/false return blocks (for cross-leaf order resolution).
+  auto buildBoolExit = [&](bool value) -> SILBasicBlock * {
+    auto *bb = thunk->createBasicBlock();
+    SILBuilder B(bb);
+    auto *bit = B.createIntegerLiteral(loc, i1Ty, value ? 1 : 0);
+    auto *boolStruct = B.createStruct(loc, silBoolTy, {bit});
+    B.createBranch(loc, exitBB, {boolStruct});
+    return bb;
+  };
+  auto *trueExitBB = buildBoolExit(true);
+  auto *falseExitBB = buildBoolExit(false);
+
+  auto eqInfo = SGM.Types.getConstantInfo(
+      TypeExpansionContext::minimal(), reqRef);
+  auto eqSILTy = SILType::getPrimitiveObjectType(eqInfo.SILFnType);
+
+  // For each leaf L_i, emit: try cast lhs -> L_i;
+  //   on success: alloc rhs slot, try cast rhs -> L_i;
+  //     both: dispatch leaf's <
+  //     rhs-fail: try rhs against later leaves (j > i): if rhs is
+  //       L_j, then lhs (L_i) < rhs (L_j) — true. If none of the
+  //       later leaves match, rhs is one of L_<i, so lhs < rhs is
+  //       false.
+  //   on lhs-fail: try next leaf
+  //
+  // To keep the cascade simple we encode the cross-leaf order
+  // resolution as: rhs-fail at L_i implies rhs is some L_j with
+  // j != i. We can't easily distinguish j<i from j>i in a single
+  // cascade pass without a metadata-compare; instead, emit a
+  // secondary cascade that classifies rhs's leaf index, then
+  // returns (i < rhsIdx).
+  SILBasicBlock *currentBB = entry;
+  for (size_t i = 0; i < leaves.size(); i++) {
+    auto leafTy = leaves[i]->getCanonicalType();
+    auto silLeafAddrTy = SILType::getPrimitiveAddressType(leafTy);
+
+    SILBuilder B(currentBB);
+    auto *lhsLeafSlot = B.createAllocStack(loc, silLeafAddrTy);
+
+    auto *lhsOkBB = thunk->createBasicBlock();
+    auto *lhsFailBB = thunk->createBasicBlock();
+    B.createCheckedCastAddrBranch(loc, CheckedCastInstOptions(),
+        CastConsumptionKind::CopyOnSuccess,
+        lhsAddr, srcArchetype,
+        lhsLeafSlot, leafTy,
+        lhsOkBB, lhsFailBB);
+
+    // lhsOk: rhs needs to also be L_i for a same-leaf dispatch.
+    SILBuilder okB(lhsOkBB);
+    auto *rhsLeafSlot = okB.createAllocStack(loc, silLeafAddrTy);
+    auto *bothOkBB = thunk->createBasicBlock();
+    auto *rhsFailBB = thunk->createBasicBlock();
+    okB.createCheckedCastAddrBranch(loc, CheckedCastInstOptions(),
+        CastConsumptionKind::CopyOnSuccess,
+        rhsAddr, srcArchetype,
+        rhsLeafSlot, leafTy,
+        bothOkBB, rhsFailBB);
+
+    // bothOk: dispatch leaf's <
+    SILBuilder bothB(bothOkBB);
+    auto leafConf = swift::lookupConformance(leafTy, comparable);
+    assert(leafConf && "leaf was checked to conform at lookup time");
+    auto witness = bothB.createWitnessMethod(loc, leafTy, leafConf,
+                                             reqRef, eqSILTy);
+    auto subs = SubstitutionMap::getProtocolSubstitutions(
+        comparable, leafTy, leafConf);
+    auto metaTy = SILType::getPrimitiveObjectType(
+        CanMetatypeType::get(leafTy, MetatypeRepresentation::Thick));
+    auto *metaVal = bothB.createMetatype(loc, metaTy);
+    auto *applyResult = bothB.createApply(loc, witness, subs,
+        {lhsLeafSlot, rhsLeafSlot, metaVal});
+    bothB.createDestroyAddr(loc, lhsLeafSlot);
+    bothB.createDestroyAddr(loc, rhsLeafSlot);
+    bothB.createDeallocStack(loc, rhsLeafSlot);
+    bothB.createDeallocStack(loc, lhsLeafSlot);
+    bothB.createBranch(loc, exitBB, {applyResult});
+
+    // rhsFail: lhs is L_i, rhs is some L_j (j != i). Cross-leaf
+    // order: lhs<rhs iff i<j. Try rhs against leaves L_{i+1}, ...
+    // L_{n-1}; on first match: i<j → true. If none match (rhs is
+    // a leaf < i): i>j → false.
+    {
+      SILBuilder rhsFB(rhsFailBB);
+      rhsFB.createDestroyAddr(loc, lhsLeafSlot);
+      rhsFB.createDeallocStack(loc, rhsLeafSlot);
+      rhsFB.createDeallocStack(loc, lhsLeafSlot);
+    }
+    SILBasicBlock *currentScanBB = rhsFailBB;
+    for (size_t j = i + 1; j < leaves.size(); j++) {
+      auto rhsLeafTy = leaves[j]->getCanonicalType();
+      auto rhsSilTy = SILType::getPrimitiveAddressType(rhsLeafTy);
+      SILBuilder scanB(currentScanBB);
+      auto *probeSlot = scanB.createAllocStack(loc, rhsSilTy);
+      auto *matchBB = thunk->createBasicBlock();
+      auto *missBB = thunk->createBasicBlock();
+      scanB.createCheckedCastAddrBranch(loc,
+          CheckedCastInstOptions(),
+          CastConsumptionKind::CopyOnSuccess,
+          rhsAddr, srcArchetype,
+          probeSlot, rhsLeafTy,
+          matchBB, missBB);
+
+      // match: i<j, lhs<rhs is true.
+      SILBuilder matchB(matchBB);
+      matchB.createDestroyAddr(loc, probeSlot);
+      matchB.createDeallocStack(loc, probeSlot);
+      matchB.createBranch(loc, trueExitBB);
+
+      // miss: probeSlot uninit (copy_on_success), continue.
+      SILBuilder missB(missBB);
+      missB.createDeallocStack(loc, probeSlot);
+      currentScanBB = missBB;
+    }
+    // Out of higher leaves — rhs is some L_<i, so lhs>rhs (false).
+    {
+      SILBuilder finalB(currentScanBB);
+      finalB.createBranch(loc, falseExitBB);
+    }
+
+    // lhsFail: lhs slot uninit, dealloc, try next leaf.
+    SILBuilder lhsFB(lhsFailBB);
+    lhsFB.createDeallocStack(loc, lhsLeafSlot);
+    if (i + 1 < leaves.size()) {
+      auto *nextBB = thunk->createBasicBlock();
+      lhsFB.createBranch(loc, nextBB);
+      currentBB = nextBB;
+    } else {
+      // Should be unreachable (every leaf was tried), but emit
+      // a safe fallback.
+      lhsFB.createBranch(loc, falseExitBB);
+    }
+  }
+
+  return true;
+}
+
 /// Phase 3.F slice 7: synthesize per-leaf dispatch for
 /// `Hashable._rawHashValue(seed:)` on a narrowed-Any type.
 /// Signature: `(Int seed, @in_guaranteed Self) -> Int`.
@@ -1276,7 +1470,9 @@ SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
           !tryEmitNarrowedAnyHashableHashIntoDispatch(*this, thunk, entry,
                                                       conformance, reqRef) &&
           !tryEmitNarrowedAnyHashableRawHashValueDispatch(*this, thunk, entry,
-                                                          conformance, reqRef)) {
+                                                          conformance, reqRef) &&
+          !tryEmitNarrowedAnyComparableLessThanDispatch(*this, thunk, entry,
+                                                        conformance, reqRef)) {
         SILBuilder builder(entry);
         builder.createUnreachable(RegularLocation::getModuleLocation());
       }

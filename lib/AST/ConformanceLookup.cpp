@@ -137,7 +137,8 @@ swift::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
     // wiring Hashable again with the slice-7 IRGen accessor +
     // BaseProtocolWitness path.
     if (protocol->isSpecificProtocol(KnownProtocolKind::Equatable) ||
-        protocol->isSpecificProtocol(KnownProtocolKind::Hashable)) {
+        protocol->isSpecificProtocol(KnownProtocolKind::Hashable) ||
+        protocol->isSpecificProtocol(KnownProtocolKind::Comparable)) {
       Type peeled = getConstraintType();
       if (auto *ext = peeled->getAs<ExistentialType>())
         peeled = ext->getConstraintType();
