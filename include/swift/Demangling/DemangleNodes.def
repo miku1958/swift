@@ -233,6 +233,13 @@ NODE(ProtocolListWithAnyObject)
 NODE(ProtocolSelfConformanceDescriptor)
 NODE(ProtocolSelfConformanceWitness)
 NODE(ProtocolSelfConformanceWitnessTable)
+// Phase 3.F slice 4: per-narrowed-Any synthesised witness table
+// (mangling operator `WX`). Carries the narrowed-Any conforming type
+// + the protocol it conforms to. Decoded representation:
+//   NarrowedAnyDispatchWitnessTable
+//     ├── Type         (the narrowed-Any)
+//     └── Protocol     (the protocol)
+NODE(NarrowedAnyDispatchWitnessTable)
 NODE(ProtocolWitness)
 NODE(ProtocolWitnessTable)
 NODE(ProtocolWitnessTableAccessor)

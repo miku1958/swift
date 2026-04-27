@@ -3010,6 +3010,15 @@ ManglingError Remangler::mangleProtocolWitnessTable(Node *node,
   return ManglingError::Success;
 }
 
+ManglingError
+Remangler::mangleNarrowedAnyDispatchWitnessTable(Node *node, unsigned depth) {
+  // Layout: <conformingType><protocolName>WX
+  RETURN_IF_ERROR(mangleType(node->getChild(0), depth + 1));
+  RETURN_IF_ERROR(manglePureProtocol(node->getChild(1), depth + 1));
+  Buffer << "WX";
+  return ManglingError::Success;
+}
+
 ManglingError Remangler::mangleProtocolWitnessTablePattern(Node *node,
                                                            unsigned depth) {
   RETURN_IF_ERROR(mangleSingleChildNode(node, depth + 1));

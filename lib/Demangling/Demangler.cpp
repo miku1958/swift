@@ -3706,6 +3706,14 @@ NodePointer Demangler::demangleWitness() {
     case 'S':
       return createWithChild(Node::Kind::ProtocolSelfConformanceWitnessTable,
                              popProtocol());
+    case 'X': {
+      // Phase 3.F slice 4: per-narrowed-Any dispatch witness table.
+      // Layout: <conformingType><protocolName>WX
+      NodePointer Proto = popProtocol();
+      NodePointer Type = popNode(Node::Kind::Type);
+      return createWithChildren(Node::Kind::NarrowedAnyDispatchWitnessTable,
+                                Type, Proto);
+    }
     case 'P':
       return createWithChild(Node::Kind::ProtocolWitnessTable,
                              popProtocolConformance());

@@ -905,6 +905,14 @@ ManglingError Remangler::mangleProtocolWitnessTable(Node *node,
   return mangleSingleChildNode(node, depth + 1); // protocol conformance
 }
 
+ManglingError
+Remangler::mangleNarrowedAnyDispatchWitnessTable(Node *node, unsigned depth) {
+  Buffer << "WX";
+  // children: type, protocol
+  RETURN_IF_ERROR(mangle(node->getChild(0), depth + 1));
+  return mangle(node->getChild(1), depth + 1);
+}
+
 ManglingError Remangler::mangleGenericProtocolWitnessTable(Node *node,
                                                            unsigned depth) {
   Buffer << "WG";
