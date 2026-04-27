@@ -6137,6 +6137,27 @@ void swift::diagnoseConformanceFailure(Type T,
 
   diags.diagnose(ComplainLoc, diag::type_does_not_conform,
                  T, Proto->getDeclaredInterfaceType());
+
+  // Phase 3.F slice 20 follow-up: when T is a narrowed-Any whose
+  // builtin protocol synth requires every leaf to conform, point
+  // the user at the specific leaf that is blocking the synthesis
+  // — same hint the binop diagnostic shows, but for the broader
+  // "type does not conform" path that fires for `Set<V>(arr)`,
+  // `JSONEncoder().encode(v)`, and any other library call that
+  // needs a generic constraint satisfied.
+  Type peeled = T;
+  if (auto *ext = peeled->getAs<ExistentialType>())
+    peeled = ext->getConstraintType();
+  if (auto *na = peeled->getAs<NarrowedAnyType>()) {
+    for (auto leaf : na->getAlternatives()) {
+      if (!checkConformance(leaf, Proto)) {
+        diags.diagnose(ComplainLoc,
+                       diag::narrowed_any_leaf_missing_conformance,
+                       T, leaf, Proto->getName());
+        break;
+      }
+    }
+  }
 }
 
 std::pair<bool, ProtocolConformanceRef>
