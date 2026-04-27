@@ -10495,6 +10495,41 @@ performMemberLookup(ConstraintKind constraintKind, DeclNameRef memberName,
     }
   }
 
+  // Narrowed-Any base: an unqualified member like `.a(7)` against
+  // `let v: E | String = .a(7)` cannot resolve directly against the
+  // existential — recurse through each declared alternative and union
+  // the viable / unviable results. The constraint solver then picks
+  // a leaf where the lookup succeeds (or reports the union of
+  // failures otherwise).
+  {
+    Type peeled = instanceTy;
+    if (auto *ext = peeled->getAs<ExistentialType>())
+      peeled = ext->getConstraintType();
+    if (auto *na = peeled->getAs<NarrowedAnyType>()) {
+      MemberLookupResult merged;
+      merged.OverallResult = MemberLookupResult::HasResults;
+      for (Type alt : na->getAlternatives()) {
+        // If the original base was a metatype, route the recursive
+        // call against the alternative's metatype so the per-leaf
+        // lookup sees the same kind of receiver.
+        Type altBase = baseObjTy->is<AnyMetatypeType>()
+                           ? Type(MetatypeType::get(alt))
+                           : alt;
+        auto altResult = performMemberLookup(constraintKind, memberName,
+                                             altBase, functionRefInfo,
+                                             memberLocator,
+                                             includeInaccessibleMembers);
+        for (auto &c : altResult.ViableCandidates)
+          merged.ViableCandidates.push_back(c);
+        for (auto &c : altResult.UnviableCandidates)
+          merged.UnviableCandidates.push_back(c);
+        for (auto reason : altResult.UnviableReasons)
+          merged.UnviableReasons.push_back(reason);
+      }
+      return merged;
+    }
+  }
+
   // Okay, start building up the result list.
   result.OverallResult = MemberLookupResult::HasResults;
 
