@@ -7825,8 +7825,25 @@ public:
 
   void visitNarrowedAnyType(NarrowedAnyType *T,
                             NonRecursivePrintOptions nrOptions) {
-    interleave(T->getAlternatives(), [&](Type Ty) { visit(Ty); },
-               [&] { Printer << " | "; });
+    interleave(T->getAlternatives(), [&](Type Ty) {
+      // A nested narrowed-Any alternative comes through as
+      // `ExistentialType(NarrowedAnyType)`. Printing it directly would
+      // emit a redundant leading `any` (the outer existential prints
+      // its own `any`) and lose the structural grouping. Strip the
+      // inner existential and parenthesize the inner alternatives so
+      // the result reads as `any (Int | String) | Bool` instead of
+      // `any any Int | String | Bool`.
+      Type peeled = Ty;
+      if (auto *e = Ty->getAs<ExistentialType>())
+        peeled = e->getConstraintType();
+      if (peeled->is<NarrowedAnyType>()) {
+        Printer << "(";
+        visit(peeled);
+        Printer << ")";
+        return;
+      }
+      visit(Ty);
+    }, [&] { Printer << " | "; });
   }
 
   void visitParameterizedProtocolType(ParameterizedProtocolType *T,
