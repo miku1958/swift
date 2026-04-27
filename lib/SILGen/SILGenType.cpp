@@ -892,6 +892,236 @@ static bool tryEmitNarrowedAnyEquatableEqDispatch(
   return true;
 }
 
+/// Phase 3.F slice 7: synthesize per-leaf dispatch for
+/// `Hashable._rawHashValue(seed:)` on a narrowed-Any type.
+/// Signature: `(Int seed, @in_guaranteed Self) -> Int`.
+/// Body: for each leaf, try cast self -> leaf; on success
+/// witness_method(_rawHashValue) on leaf's conformance, apply,
+/// return its Int result; on all-fail return the seed unchanged.
+static bool tryEmitNarrowedAnyHashableRawHashValueDispatch(
+    SILGenModule &SGM, SILFunction *thunk, SILBasicBlock *entry,
+    BuiltinProtocolConformance *conformance, SILDeclRef reqRef) {
+  ASTContext &ctx = SGM.getASTContext();
+  auto *hashable = ctx.getProtocol(KnownProtocolKind::Hashable);
+  if (conformance->getProtocol() != hashable)
+    return false;
+
+  auto *funcReq = dyn_cast_or_null<AbstractFunctionDecl>(reqRef.getDecl());
+  if (!funcReq || funcReq->getBaseIdentifier().str() != "_rawHashValue")
+    return false;
+
+  Type peeled = conformance->getType();
+  if (auto *ext = peeled->getAs<ExistentialType>())
+    peeled = ext->getConstraintType();
+  auto *narrowedAny = peeled->getAs<NarrowedAnyType>();
+  if (!narrowedAny)
+    return false;
+  auto leaves = narrowedAny->getAlternatives();
+  if (leaves.empty())
+    return false;
+
+  auto loc = RegularLocation::getModuleLocation();
+
+  auto fnArgs = entry->getArguments();
+  if (fnArgs.size() != 2)
+    return false;
+  SILValue seedVal = fnArgs[0];
+  SILValue selfAddr = fnArgs[1];
+
+  auto sig = thunk->getLoweredFunctionType()->getInvocationGenericSignature();
+  auto srcArchetype = thunk->getGenericEnvironment()
+      ->mapTypeIntoEnvironment(sig.getGenericParams()[0])
+      ->getCanonicalType();
+
+  // Int return type — read from the function signature.
+  auto intSILTy = thunk->getLoweredFunctionType()
+      ->getDirectFormalResultsType(thunk->getModule(),
+                                   thunk->getTypeExpansionContext());
+
+  // Exit block — phi takes Int result.
+  auto *exitBB = thunk->createBasicBlock();
+  auto *resultPhi =
+      exitBB->createPhiArgument(intSILTy, OwnershipKind::None);
+  {
+    SILBuilder B(exitBB);
+    B.createReturn(loc, resultPhi);
+  }
+
+  // Seed-fallback block: forward the input seed unchanged.
+  auto *fallbackBB = thunk->createBasicBlock();
+  {
+    SILBuilder B(fallbackBB);
+    B.createBranch(loc, exitBB, {seedVal});
+  }
+
+  auto reqInfo = SGM.Types.getConstantInfo(
+      TypeExpansionContext::minimal(), reqRef);
+  auto reqSILTy = SILType::getPrimitiveObjectType(reqInfo.SILFnType);
+
+  SILBasicBlock *currentBB = entry;
+  for (size_t i = 0; i < leaves.size(); i++) {
+    auto leafTy = leaves[i]->getCanonicalType();
+    auto silLeafAddrTy = SILType::getPrimitiveAddressType(leafTy);
+
+    SILBuilder B(currentBB);
+    auto *leafSlot = B.createAllocStack(loc, silLeafAddrTy);
+
+    auto *okBB = thunk->createBasicBlock();
+    auto *failBB = thunk->createBasicBlock();
+    B.createCheckedCastAddrBranch(loc, CheckedCastInstOptions(),
+        CastConsumptionKind::CopyOnSuccess,
+        selfAddr, srcArchetype,
+        leafSlot, leafTy,
+        okBB, failBB);
+
+    SILBuilder okB(okBB);
+    auto leafConf = swift::lookupConformance(leafTy, hashable);
+    assert(leafConf && "leaf was checked to conform at lookup time");
+
+    auto witness = okB.createWitnessMethod(loc, leafTy, leafConf,
+                                           reqRef, reqSILTy);
+    auto subs = SubstitutionMap::getProtocolSubstitutions(
+        hashable, leafTy, leafConf);
+
+    auto *hashResult = okB.createApply(loc, witness, subs,
+                                       {seedVal, leafSlot});
+    okB.createDestroyAddr(loc, leafSlot);
+    okB.createDeallocStack(loc, leafSlot);
+    okB.createBranch(loc, exitBB, {hashResult});
+
+    SILBuilder failB(failBB);
+    failB.createDeallocStack(loc, leafSlot);
+    if (i + 1 < leaves.size()) {
+      auto *nextBB = thunk->createBasicBlock();
+      failB.createBranch(loc, nextBB);
+      currentBB = nextBB;
+    } else {
+      failB.createBranch(loc, fallbackBB);
+    }
+  }
+
+  return true;
+}
+
+/// Phase 3.F slice 7: synthesize per-leaf dispatch for
+/// `Hashable.hash(into:)` on a narrowed-Any type.
+///
+/// On entry `entry` already has the SILFunctionArguments
+/// [hasher: $*Hasher (inout), self: $*τ_0_0, selfMeta: $@thick τ_0_0.Type].
+/// For each declared leaf L:
+///   1. alloc_stack a slot for L, try cast self -> L
+///   2. on success: witness_method on L's Hashable.hash(into:)
+///      with the same hasher, apply, br exit
+///   3. on fail: try next leaf
+/// All leaves miss → no-op br exit (Hasher gets nothing combined,
+/// semantically wrong but doesn't crash; rare since Sema gates the
+/// conformance to "all leaves conform to Hashable").
+///
+/// Returns true if dispatch was emitted; false otherwise (caller
+/// falls back to trap-stub).
+static bool tryEmitNarrowedAnyHashableHashIntoDispatch(
+    SILGenModule &SGM, SILFunction *thunk, SILBasicBlock *entry,
+    BuiltinProtocolConformance *conformance, SILDeclRef reqRef) {
+  ASTContext &ctx = SGM.getASTContext();
+  auto *hashable = ctx.getProtocol(KnownProtocolKind::Hashable);
+  if (conformance->getProtocol() != hashable)
+    return false;
+
+  // Detect Hashable's `hash(into:)` instance method.
+  auto *funcReq = dyn_cast_or_null<AbstractFunctionDecl>(reqRef.getDecl());
+  if (!funcReq || funcReq->getBaseIdentifier().str() != "hash")
+    return false;
+
+  Type peeled = conformance->getType();
+  if (auto *ext = peeled->getAs<ExistentialType>())
+    peeled = ext->getConstraintType();
+  auto *narrowedAny = peeled->getAs<NarrowedAnyType>();
+  if (!narrowedAny)
+    return false;
+  auto leaves = narrowedAny->getAlternatives();
+  if (leaves.empty())
+    return false;
+
+  auto loc = RegularLocation::getModuleLocation();
+
+  auto fnArgs = entry->getArguments();
+  // Hashable.hash(into:) is an instance method, lowered as
+  //   (@inout Hasher, @in_guaranteed Self) -> ()
+  // — 2 args, no implicit @thick Self.Type (that only appears for
+  // static witness methods like Equatable.==). The witness_method
+  // convention's Self metadata is passed via the implicit %Self
+  // parameter at the LLVM level, but at SIL level the function has
+  // exactly 2 args.
+  if (fnArgs.size() != 2)
+    return false;
+  SILValue hasherInout = fnArgs[0];
+  SILValue selfAddr = fnArgs[1];
+
+  // Source archetype for τ_0_0.
+  auto sig = thunk->getLoweredFunctionType()->getInvocationGenericSignature();
+  auto srcArchetype = thunk->getGenericEnvironment()
+      ->mapTypeIntoEnvironment(sig.getGenericParams()[0])
+      ->getCanonicalType();
+
+  // Exit block — empty Void return.
+  auto *exitBB = thunk->createBasicBlock();
+  {
+    SILBuilder B(exitBB);
+    auto voidVal = B.createTuple(loc, {});
+    B.createReturn(loc, voidVal);
+  }
+
+  auto reqInfo = SGM.Types.getConstantInfo(
+      TypeExpansionContext::minimal(), reqRef);
+  auto reqSILTy = SILType::getPrimitiveObjectType(reqInfo.SILFnType);
+
+  SILBasicBlock *currentBB = entry;
+  for (size_t i = 0; i < leaves.size(); i++) {
+    auto leafTy = leaves[i]->getCanonicalType();
+    auto silLeafAddrTy = SILType::getPrimitiveAddressType(leafTy);
+
+    SILBuilder B(currentBB);
+    auto *leafSlot = B.createAllocStack(loc, silLeafAddrTy);
+
+    auto *okBB = thunk->createBasicBlock();
+    auto *failBB = thunk->createBasicBlock();
+    B.createCheckedCastAddrBranch(loc, CheckedCastInstOptions(),
+        CastConsumptionKind::CopyOnSuccess,
+        selfAddr, srcArchetype,
+        leafSlot, leafTy,
+        okBB, failBB);
+
+    // ok: dispatch leaf's hash(into:).
+    SILBuilder okB(okBB);
+    auto leafConf = swift::lookupConformance(leafTy, hashable);
+    assert(leafConf && "leaf was checked to conform at lookup time");
+
+    auto witness = okB.createWitnessMethod(loc, leafTy, leafConf,
+                                           reqRef, reqSILTy);
+    auto subs = SubstitutionMap::getProtocolSubstitutions(
+        hashable, leafTy, leafConf);
+
+    okB.createApply(loc, witness, subs,
+                    {hasherInout, leafSlot});
+    okB.createDestroyAddr(loc, leafSlot);
+    okB.createDeallocStack(loc, leafSlot);
+    okB.createBranch(loc, exitBB);
+
+    // fail: dealloc, try next leaf or br exit.
+    SILBuilder failB(failBB);
+    failB.createDeallocStack(loc, leafSlot);
+    if (i + 1 < leaves.size()) {
+      auto *nextBB = thunk->createBasicBlock();
+      failB.createBranch(loc, nextBB);
+      currentBB = nextBB;
+    } else {
+      failB.createBranch(loc, exitBB);
+    }
+  }
+
+  return true;
+}
+
 SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
     BuiltinProtocolConformance *conformance) {
   // Phase 3.F slice 2+3 stub: emit an empty SILWitnessTable so the
@@ -1037,11 +1267,16 @@ SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
            fnConv.getParameterSILTypes(expansion))
         entry->createFunctionArgument(thunk->mapTypeIntoEnvironment(paramTy));
 
-      // Phase 3.F slice 6: try real per-leaf dispatch for
-      // Equatable.==. Falls through to trap-stub for any other
-      // requirement (Hashable.hash(into:) etc.) — tracked in todo.
+      // Phase 3.F slice 6 / 7: try real per-leaf dispatch for the
+      // protocol's known requirements (Equatable.==, Hashable.hash,
+      // Hashable._rawHashValue). Falls through to trap-stub for any
+      // other requirement.
       if (!tryEmitNarrowedAnyEquatableEqDispatch(*this, thunk, entry,
-                                                 conformance, reqRef)) {
+                                                 conformance, reqRef) &&
+          !tryEmitNarrowedAnyHashableHashIntoDispatch(*this, thunk, entry,
+                                                      conformance, reqRef) &&
+          !tryEmitNarrowedAnyHashableRawHashValueDispatch(*this, thunk, entry,
+                                                          conformance, reqRef)) {
         SILBuilder builder(entry);
         builder.createUnreachable(RegularLocation::getModuleLocation());
       }
