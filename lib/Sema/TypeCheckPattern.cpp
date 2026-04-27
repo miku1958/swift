@@ -1465,6 +1465,13 @@ Pattern *TypeChecker::coercePatternToType(
             // arm matches none of the values when T isn't a leaf).
             diags.diagnose(IP->getLoc(), diag::narrowed_any_cast_nonleaf,
                            type, IP->getCastType(), 0);
+            llvm::SmallString<128> leafBuf;
+            llvm::raw_svector_ostream leafOS(leafBuf);
+            llvm::interleaveComma(na->getAlternatives(), leafOS,
+                                  [&](Type leaf) { leaf->print(leafOS); });
+            diags.diagnose(IP->getLoc(),
+                           diag::narrowed_any_cast_nonleaf_leaves,
+                           type, leafOS.str());
           }
         }
       }

@@ -4184,6 +4184,14 @@ namespace {
       }
       ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_cast_nonleaf,
                          fromType, toType, diagSelect);
+      // Note: list the leaves so the user has a visible fix.
+      llvm::SmallString<128> leafBuf;
+      llvm::raw_svector_ostream leafOS(leafBuf);
+      llvm::interleaveComma(na->getAlternatives(), leafOS,
+                            [&](Type leaf) { leaf->print(leafOS); });
+      ctx.Diags.diagnose(expr->getLoc(),
+                         diag::narrowed_any_cast_nonleaf_leaves,
+                         fromType, leafOS.str());
     }
 
     Expr *visitIsExpr(IsExpr *expr) {

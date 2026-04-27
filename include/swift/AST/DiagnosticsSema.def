@@ -1513,6 +1513,8 @@ WARNING(narrowed_any_cast_nonleaf,none,
         "%select{returns nil|fails|evaluates to false}2 because %1 is "
         "not in the closed leaf set of %0",
         (Type, Type, unsigned))
+NOTE(narrowed_any_cast_nonleaf_leaves,none,
+     "valid leaves of %0 are: %1", (Type, StringRef))
 NOTE(downcast_to_unrelated_fixit,none,
      "did you mean to call %0 with '()'?", (Identifier))
 ERROR(optional_chain_noop,none,
