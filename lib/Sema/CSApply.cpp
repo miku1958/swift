@@ -4158,6 +4158,14 @@ namespace {
       if (SuppressDiagnostics)
         return;
 
+      // Skip when src and tgt canonicalise to the same type — the
+      // pre-existing "conditional cast from %0 to %0 always
+      // succeeds" / "'as' / 'is' test is always true" diagnostic
+      // already covers this with cleaner wording, and we don't want
+      // to emit two warnings for one expression.
+      if (fromType->getCanonicalType() == toType->getCanonicalType())
+        return;
+
       Type peeledFrom = fromType;
       if (auto opt = peeledFrom->getOptionalObjectType())
         peeledFrom = opt;
