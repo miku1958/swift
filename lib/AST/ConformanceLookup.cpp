@@ -142,14 +142,6 @@ swift::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
   // "doesn't conform" diagnostic at compile time, instead of
   // accepting and ICE'ing later in `getConformancePath`.
   if (layout.isNarrowedAny()) {
-    // Synthesise only when (a) the protocol is a marker (no
-    // witness-table dispatch needed; e.g. Copyable, Escapable,
-    // Sendable) or (b) the protocol has self-conformance support
-    // (Error). Other protocols would need real witness emission and
-    // ICE in `getConformancePath` if accepted at Sema-time.
-    if (!protocol->isMarkerProtocol() &&
-        !protocol->requiresSelfConformanceWitnessTable())
-      return ProtocolConformanceRef::forInvalid();
     bool allConform = true;
     for (Type alt : layout.getNarrowedAlternatives()) {
       auto altConformance = lookupConformance(alt, protocol,
@@ -159,8 +151,22 @@ swift::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
         break;
       }
     }
-    if (allConform)
+    if (!allConform)
+      return ProtocolConformanceRef::forInvalid();
+
+    // Marker / self-conforming-witness-table protocols (Sendable /
+    // Copyable / Escapable / Error) have ABI-supported dispatch
+    // through the existential layout, so a self-conformance is the
+    // exact fit.
+    if (protocol->isMarkerProtocol() ||
+        protocol->requiresSelfConformanceWitnessTable())
       return ProtocolConformanceRef(ctx.getSelfConformance(protocol));
+
+    // Other protocols (Hashable, Encodable, Decodable, etc.) need
+    // real witness emission that Phase 3 doesn't yet provide. Letting
+    // them fall through to invalid keeps the user out of
+    // `getConformancePath` ICEs while clearly diagnosing "doesn't
+    // conform" at compile time.
     return ProtocolConformanceRef::forInvalid();
   }
 
