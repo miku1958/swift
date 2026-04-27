@@ -1450,8 +1450,24 @@ Pattern *TypeChecker::coercePatternToType(
         Type peeledTo = IP->getCastType();
         if (auto opt = peeledTo->getOptionalObjectType())
           peeledTo = opt;
-        if (!peeledTo->isExistentialType() && !peeledTo->hasArchetype() &&
-            !peeledTo->is<NarrowedAnyType>()) {
+        if (auto *ext = peeledTo->getAs<ExistentialType>())
+          peeledTo = ext->getConstraintType();
+
+        bool emit = false;
+        if (auto *naTo = peeledTo->getAs<NarrowedAnyType>()) {
+          // Both sides narrowed-Any: warn iff leaf sets are disjoint.
+          llvm::SmallPtrSet<TypeBase *, 4> srcLeaves;
+          for (auto leaf : na->getAlternatives())
+            srcLeaves.insert(leaf->getCanonicalType().getPointer());
+          bool overlap = false;
+          for (auto leaf : naTo->getAlternatives()) {
+            if (srcLeaves.count(leaf->getCanonicalType().getPointer())) {
+              overlap = true;
+              break;
+            }
+          }
+          emit = !overlap;
+        } else if (!peeledTo->isExistentialType() && !peeledTo->hasArchetype()) {
           auto peeledToCanon = peeledTo->getCanonicalType();
           bool isLeaf = false;
           for (auto leaf : na->getAlternatives()) {
@@ -1460,19 +1476,21 @@ Pattern *TypeChecker::coercePatternToType(
               break;
             }
           }
-          if (!isLeaf) {
-            // diagSelect = 0 ("case _ as T" behaves like `as?` —
-            // arm matches none of the values when T isn't a leaf).
-            diags.diagnose(IP->getLoc(), diag::narrowed_any_cast_nonleaf,
-                           type, IP->getCastType(), 0);
-            llvm::SmallString<128> leafBuf;
-            llvm::raw_svector_ostream leafOS(leafBuf);
-            llvm::interleaveComma(na->getAlternatives(), leafOS,
-                                  [&](Type leaf) { leaf->print(leafOS); });
-            diags.diagnose(IP->getLoc(),
-                           diag::narrowed_any_cast_nonleaf_leaves,
-                           type, leafOS.str());
-          }
+          emit = !isLeaf;
+        }
+
+        if (emit) {
+          // diagSelect = 0 ("case _ as T" behaves like `as?` —
+          // arm matches none of the values when T isn't a leaf).
+          diags.diagnose(IP->getLoc(), diag::narrowed_any_cast_nonleaf,
+                         type, IP->getCastType(), 0);
+          llvm::SmallString<128> leafBuf;
+          llvm::raw_svector_ostream leafOS(leafBuf);
+          llvm::interleaveComma(na->getAlternatives(), leafOS,
+                                [&](Type leaf) { leaf->print(leafOS); });
+          diags.diagnose(IP->getLoc(),
+                         diag::narrowed_any_cast_nonleaf_leaves,
+                         type, leafOS.str());
         }
       }
     }

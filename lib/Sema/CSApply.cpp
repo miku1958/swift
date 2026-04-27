@@ -4171,14 +4171,36 @@ namespace {
       if (toExt)
         peeledTo = toExt->getConstraintType();
 
-      // Direction A: src is narrowed-Any, target is concrete non-leaf.
+      // Direction A: src is narrowed-Any, target is concrete non-leaf
+      // OR a narrowed-Any with no overlapping leaves.
       if (auto *na = peeledFrom->getAs<NarrowedAnyType>()) {
-        // Don't fire if the target is itself an existential / archetype
-        // / narrowed-Any — the runtime will need to inspect the dynamic
-        // type and the static check is not informative.
-        if (peeledTo->isExistentialType() || peeledTo->hasArchetype() ||
-            peeledTo->is<NarrowedAnyType>())
+        if (peeledTo->isExistentialType() || peeledTo->hasArchetype()) {
+          // Generic existential / opaque target — runtime must inspect.
+          // Exception: narrowed-Any-to-narrowed-Any with disjoint leaf
+          // sets is also statically empty, so check that case below.
+          if (auto *naTo = peeledTo->getAs<NarrowedAnyType>()) {
+            llvm::SmallPtrSet<TypeBase *, 4> srcLeaves;
+            for (auto leaf : na->getAlternatives())
+              srcLeaves.insert(leaf->getCanonicalType().getPointer());
+            for (auto leaf : naTo->getAlternatives()) {
+              if (srcLeaves.count(leaf->getCanonicalType().getPointer()))
+                return; // overlap exists, runtime will sort it out
+            }
+            // No overlap — statically empty.
+            ctx.Diags.diagnose(expr->getLoc(),
+                               diag::narrowed_any_cast_nonleaf,
+                               fromType, toType, diagSelect);
+            llvm::SmallString<128> leafBuf;
+            llvm::raw_svector_ostream leafOS(leafBuf);
+            llvm::interleaveComma(na->getAlternatives(), leafOS,
+                                  [&](Type leaf) { leaf->print(leafOS); });
+            ctx.Diags.diagnose(expr->getLoc(),
+                               diag::narrowed_any_cast_nonleaf_leaves,
+                               fromType, leafOS.str());
+            return;
+          }
           return;
+        }
         auto peeledToCanon = peeledTo->getCanonicalType();
         for (auto leaf : na->getAlternatives()) {
           if (leaf->getCanonicalType() == peeledToCanon)
