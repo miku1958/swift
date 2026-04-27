@@ -491,7 +491,57 @@ bool DoCatchStmt::isSyntacticallyExhaustive() const {
         return true;
     }
   }
-  return false;
+
+  // Phase 3.D: a do-catch over a narrowed-`Any` thrown error type
+  // is exhaustive when each declared alternative has a `catch let _
+  // as Alt:` clause — the same closed-conformer rule Phase 2b.E
+  // applied to switches. Without this the user has to either widen
+  // every catch arm to `catch { }` or wrap every call inside
+  // typed-throws-aware code.
+  auto thrownTy = getCaughtErrorType();
+  if (!thrownTy)
+    return false;
+  Type peeled = thrownTy;
+  if (auto *ext = peeled->getAs<ExistentialType>())
+    peeled = ext->getConstraintType();
+  auto *narrowed = peeled->getAs<NarrowedAnyType>();
+  if (!narrowed)
+    return false;
+
+  for (Type alt : narrowed->getAlternatives()) {
+    bool found = false;
+    for (auto clause : getCatches()) {
+      for (auto &LabelItem : clause->getCaseLabelItems()) {
+        // Skip refinable patterns with where-clauses.
+        if (LabelItem.getGuardExpr())
+          continue;
+        auto *pat = LabelItem.getPattern();
+        if (!pat) continue;
+        // Look through binding / paren wrappers down to the IsPattern.
+        const Pattern *cur = pat;
+        while (true) {
+          if (auto *bp = dyn_cast<BindingPattern>(cur)) {
+            cur = bp->getSubPattern(); continue;
+          }
+          if (auto *pp = dyn_cast<ParenPattern>(cur)) {
+            cur = pp->getSubPattern(); continue;
+          }
+          break;
+        }
+        if (auto *ip = dyn_cast<IsPattern>(cur)) {
+          if (ip->getCastType() &&
+              ip->getCastType()->getCanonicalType() ==
+                  alt->getCanonicalType()) {
+            found = true;
+            break;
+          }
+        }
+      }
+      if (found) break;
+    }
+    if (!found) return false;
+  }
+  return true;
 }
 
 BraceStmt *ForEachStmt::getDesugaredStmt() {
