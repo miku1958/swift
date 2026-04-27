@@ -1321,6 +1321,40 @@ namespace {
       SmallString<128> missingSeveralCasesFixIt;
       int diagnosedCases = 0;
 
+      // Phase 3.F slice 21: when the subject is a narrowed-Any with a
+      // Bool leaf, two `BooleanConstant(true)` + `BooleanConstant(false)`
+      // missing spaces should fold back into a single
+      // `case _ as Bool:` fix-it. Without this, the user sees
+      // "add missing case: 'true'" / "add missing case: 'false'",
+      // which is a misleading suggestion for narrowed-Any switches —
+      // the right shape is `case _ as Bool:`. Pre-collect the missing
+      // spaces and detect the Bool decomposition pattern.
+      bool subjectIsNarrowedAny = false;
+      bool boolIsLeaf = false;
+      auto subjectType = Switch->getSubjectExpr()->getType();
+      if (auto *na = Space::getNarrowedAny(subjectType)) {
+        subjectIsNarrowedAny = true;
+        for (auto leaf : na->getAlternatives()) {
+          if (leaf->isBool()) {
+            boolIsLeaf = true;
+            break;
+          }
+        }
+      }
+      bool sawBoolTrue = false;
+      bool sawBoolFalse = false;
+      if (subjectIsNarrowedAny && boolIsLeaf) {
+        processUncoveredSpaces([&](const Space &space, bool) {
+          if (space.getKind() == SpaceKind::BooleanConstant) {
+            if (space.getBoolValue())
+              sawBoolTrue = true;
+            else
+              sawBoolFalse = true;
+          }
+        });
+      }
+      bool foldBoolLeaf = sawBoolTrue && sawBoolFalse;
+
       processUncoveredSpaces([&](const Space &space,
                                  bool onlyOneUncoveredSpace) {
         llvm::SmallString<64> fixItBuffer;
@@ -1329,6 +1363,21 @@ namespace {
           fixItOS << "@unknown " << tok::kw_default << ":\n<#fatalError()#>\n";
           DE.diagnose(startLoc, diag::missing_unknown_case)
               .fixItInsert(insertLoc, fixItBuffer.str());
+        } else if (foldBoolLeaf &&
+                   space.getKind() == SpaceKind::BooleanConstant) {
+          // Emit "case _ as Bool:" once for the `true` half and skip
+          // the `false` half. Both must be missing for the fold to
+          // apply, so both will be visited; we deduplicate here.
+          if (!space.getBoolValue())
+            return; // already emitted on the `true` visit
+          llvm::StringRef caseStr = "_ as Bool";
+          fixItOS << tok::kw_case << " " << caseStr << ":\n"
+                  << placeholder << "\n";
+          DE.diagnose(startLoc, diag::missing_particular_case, caseStr)
+              .fixItInsert(insertLoc, fixItBuffer);
+          diagnosedCases += 1;
+          missingSeveralCasesFixIt += fixItBuffer;
+          return;
         } else {
           llvm::SmallString<64> spaceBuffer;
           llvm::raw_svector_ostream spaceOS(spaceBuffer);
