@@ -1041,6 +1041,17 @@ InferredGenericSignatureRequest::evaluate(
                         genericParam, result->getSugaredType(reduced))
               .warnUntilLanguageMode(LanguageMode::v6);
         } else {
+          // Phase 3.C: when T is bound to a narrowed-`Any` via the
+          // `where T: A | B` (or `where T == A | B`) syntax, the
+          // "non-generic T" warning is misleading — callers can still
+          // pass any leaf via the call-site leaf-injection rule, so T
+          // is generic-in-spirit at the call site. Suppress.
+          Type peeled = reduced;
+          if (auto *ext = peeled->getAs<ExistentialType>())
+            peeled = ext->getConstraintType();
+          if (peeled->is<NarrowedAnyType>())
+            continue;
+
           ctx.Diags
               .diagnose(loc,
                         diag::requires_generic_param_made_equal_to_concrete,
