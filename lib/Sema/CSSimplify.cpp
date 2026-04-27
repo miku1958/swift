@@ -4216,6 +4216,45 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
         return getTypeMatchSuccess();
     }
 
+    // Cross-shape narrowed → narrowed: if type1 is itself a
+    // narrowed-`Any` and every one of its alternatives is structurally
+    // a leaf of type2, the conversion is sound (every leaf injects
+    // through the leaf-set). The proposal still requires explicit
+    // `as` for narrowed → narrowed; this rule is what makes that
+    // explicit cast typecheck.
+    Type type1Inner = type1;
+    if (auto *ext = type1->getAs<ExistentialType>())
+      type1Inner = ext->getConstraintType();
+    if (auto *na1 = type1Inner->getAs<NarrowedAnyType>()) {
+      bool everyAltIsLeaf = true;
+      for (Type alt1 : na1->getAlternatives()) {
+        bool found = false;
+        auto canAlt1 = alt1->getCanonicalType();
+        for (Type alt2 : layout.getNarrowedAlternatives()) {
+          // Reuse structuralLeaf with `canType1` swapped in via local var
+          // — but that captures by reference; do an inline canonical-eq
+          // walk for clarity.
+          std::function<bool(Type)> leaf2 = [&](Type c) -> bool {
+            if (c->getCanonicalType() == canAlt1)
+              return true;
+            Type ci = c;
+            if (auto *e = c->getAs<ExistentialType>())
+              ci = e->getConstraintType();
+            if (auto *n = ci->getAs<NarrowedAnyType>()) {
+              for (Type a : n->getAlternatives())
+                if (leaf2(a))
+                  return true;
+            }
+            return false;
+          };
+          if (leaf2(alt2)) { found = true; break; }
+        }
+        if (!found) { everyAltIsLeaf = false; break; }
+      }
+      if (everyAltIsLeaf)
+        return getTypeMatchSuccess();
+    }
+
     TypeMatchOptions tryflags = subflags;
     auto fixesBefore = Fixes.size();
     for (auto alt : layout.getNarrowedAlternatives()) {
