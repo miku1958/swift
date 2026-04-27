@@ -218,8 +218,13 @@ llvm::Value *irgen::emitCheckedCast(IRGenFunction &IGF,
     IGF.Builder.CreateCondBr(needDestroy, destroyBB, contBB);
 
     IGF.Builder.emitBlock(destroyBB);
-    auto destSILTy = SILType::getPrimitiveAddressType(targetType);
-    emitDestroyCall(IGF, destSILTy, dest);
+    // Use the dynMeta we already loaded above (the dest existential
+    // buffer's runtime metadata) rather than re-computing through a
+    // SILType. Both the metadata load and the GEP/load that produces
+    // the destroy function pointer must dominate this block; using
+    // the SILType form would route through metadata caching that
+    // can place loads in unrelated blocks, breaking dominance.
+    emitDestroyCall(IGF, dynMeta, dest);
     IGF.Builder.CreateBr(contBB);
 
     IGF.Builder.emitBlock(contBB);
