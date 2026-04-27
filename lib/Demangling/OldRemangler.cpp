@@ -913,6 +913,14 @@ Remangler::mangleNarrowedAnyDispatchWitnessTable(Node *node, unsigned depth) {
   return mangle(node->getChild(1), depth + 1);
 }
 
+ManglingError
+Remangler::mangleNarrowedAnyDispatchConformanceDescriptor(Node *node,
+                                                          unsigned depth) {
+  Buffer << "MR";
+  RETURN_IF_ERROR(mangle(node->getChild(0), depth + 1));
+  return mangle(node->getChild(1), depth + 1);
+}
+
 ManglingError Remangler::mangleGenericProtocolWitnessTable(Node *node,
                                                            unsigned depth) {
   Buffer << "WG";

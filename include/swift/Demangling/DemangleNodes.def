@@ -240,6 +240,9 @@ NODE(ProtocolSelfConformanceWitnessTable)
 //     ├── Type         (the narrowed-Any)
 //     └── Protocol     (the protocol)
 NODE(NarrowedAnyDispatchWitnessTable)
+// Phase 3.F slice 4: per-narrowed-Any synthesised protocol conformance
+// descriptor (mangling operator `MX`). Same children as the WX form.
+NODE(NarrowedAnyDispatchConformanceDescriptor)
 NODE(ProtocolWitness)
 NODE(ProtocolWitnessTable)
 NODE(ProtocolWitnessTableAccessor)

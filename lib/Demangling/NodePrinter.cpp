@@ -480,6 +480,7 @@ bool NodePrinter::isSimpleType(NodePointer Node) {
   case Node::Kind::ProtocolSelfConformanceWitness:
   case Node::Kind::ProtocolSelfConformanceWitnessTable:
   case Node::Kind::NarrowedAnyDispatchWitnessTable:
+  case Node::Kind::NarrowedAnyDispatchConformanceDescriptor:
   case Node::Kind::ProtocolWitness:
   case Node::Kind::ProtocolWitnessTable:
   case Node::Kind::ProtocolWitnessTableAccessor:
@@ -2064,6 +2065,12 @@ NodePointer NodePrinter::print(NodePointer Node, unsigned depth,
     return nullptr;
   case Node::Kind::NarrowedAnyDispatchWitnessTable:
     Printer << "narrowed-any dispatch witness table for ";
+    print(Node->getChild(0), depth + 1);
+    Printer << " : ";
+    print(Node->getChild(1), depth + 1);
+    return nullptr;
+  case Node::Kind::NarrowedAnyDispatchConformanceDescriptor:
+    Printer << "narrowed-any dispatch conformance descriptor for ";
     print(Node->getChild(0), depth + 1);
     Printer << " : ";
     print(Node->getChild(1), depth + 1);

@@ -2574,6 +2574,17 @@ NodePointer Demangler::demangleMetatype() {
     case 'c':
       return createWithChild(Node::Kind::ProtocolConformanceDescriptor,
                              popProtocolConformance());
+    case 'R': {
+      // Phase 3.F slice 4 — narrowed-Any-dispatch protocol conformance
+      // descriptor. Layout: <conformingType><protocolName>MR
+      // (`X` collides with PrivateContextDescriptor in this switch).
+      // Parallels the witness-table-side `WX` operator. See also
+      // IRGenMangler::mangleProtocolConformanceDescriptor.
+      NodePointer Proto = popProtocol();
+      NodePointer Type = popNode(Node::Kind::Type);
+      return createWithChildren(
+          Node::Kind::NarrowedAnyDispatchConformanceDescriptor, Type, Proto);
+    }
     case 'C': {
       NodePointer Ty = popNode(Node::Kind::Type);
       if (!Ty || !isAnyGeneric(Ty->getChild(0)->getKind()))

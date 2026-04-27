@@ -237,7 +237,7 @@ std::string IRGenMangler::mangleProtocolConformanceDescriptor(
            "protocol-conformance-descriptor mangling today");
     appendType(bc->getType()->getCanonicalType(), nullptr);
     appendProtocolName(bc->getProtocol());
-    appendOperator("MX");
+    appendOperator("MR");
   } else {
     auto protocol = cast<SelfProtocolConformance>(conformance)->getProtocol();
     appendProtocolName(protocol);
@@ -276,7 +276,7 @@ std::string IRGenMangler::mangleProtocolConformanceInstantiationCache(
            "protocol-conformance-instantiation-cache mangling today");
     appendType(bc->getType()->getCanonicalType(), nullptr);
     appendProtocolName(bc->getProtocol());
-    appendOperator("MX");
+    appendOperator("MR");
   } else {
     auto protocol = cast<SelfProtocolConformance>(conformance)->getProtocol();
     appendProtocolName(protocol);
