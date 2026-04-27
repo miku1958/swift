@@ -126,6 +126,27 @@ swift::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
 
   auto layout = type->getExistentialLayout();
 
+  // Phase 2b.D: narrowed `Any` synthesises conformance to a protocol
+  // when each declared alternative conforms. Witnesses are dispatched
+  // by opening the existential and forwarding to the leaf's own
+  // conformance — exactly what `swift_dynamicCast` already does for
+  // `Any → any Error`, since the IRGen routing makes our existential
+  // layout match `Any` exactly.
+  if (layout.isNarrowedAny()) {
+    bool allConform = true;
+    for (Type alt : layout.getNarrowedAlternatives()) {
+      auto altConformance = lookupConformance(alt, protocol,
+                                              /*allowMissing=*/false);
+      if (!altConformance) {
+        allConform = false;
+        break;
+      }
+    }
+    if (allConform)
+      return ProtocolConformanceRef(ctx.getSelfConformance(protocol));
+    return ProtocolConformanceRef::forInvalid();
+  }
+
   // If the existential contains non-@objc protocols and the protocol we're
   // conforming to needs a witness table, the existential must have a
   // self-conformance witness table. For now, Swift.Error is the only one.
@@ -612,6 +633,36 @@ LookupConformanceRequest::evaluate(Evaluator &evaluator,
     for (auto ap : archetype->getConformsTo()) {
       if (ap == protocol || ap->inheritsFrom(protocol))
         return ProtocolConformanceRef::forAbstract(archetype, protocol);
+    }
+
+    // Phase 2b.D: an opened narrowed-`Any` existential archetype
+    // additionally conforms to any protocol the *join* of its
+    // alternatives covers. Symptom without this: typed-throws
+    // do-catch produces an opened archetype that the runtime can
+    // dispatch through, but Sema reports "thrown expression type
+    // 'any A | B' does not conform to 'Error'" because the
+    // archetype's conformsTo list only carries layout-level marker
+    // protocols. We peek at the originating existential type to
+    // decide.
+    if (auto *exArch = dyn_cast<ExistentialArchetypeType>(archetype)) {
+      if (auto *env = exArch->getGenericEnvironment()) {
+        Type existTy = env->getOpenedExistentialType();
+        Type inner = existTy;
+        if (auto *ext = inner->getAs<ExistentialType>())
+          inner = ext->getConstraintType();
+        if (auto *na = inner->getAs<NarrowedAnyType>()) {
+          bool allConform = true;
+          for (Type alt : na->getAlternatives()) {
+            if (!lookupConformance(alt, protocol,
+                                    /*allowMissing=*/false)) {
+              allConform = false;
+              break;
+            }
+          }
+          if (allConform)
+            return ProtocolConformanceRef::forAbstract(archetype, protocol);
+        }
+      }
     }
 
     return ProtocolConformanceRef::forMissingOrInvalid(type, protocol);

@@ -4173,12 +4173,49 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
   // describes, without involving the constraint solver's repair
   // machinery.
   if (layout.isNarrowedAny()) {
-    // Try each declared alternative as a leaf injection target. Use the
-    // full `matchTypes` so protocol-conformance and Optional injections
-    // work the same way they do in any other position — but reject any
-    // trial that recorded a "fix", which would otherwise mask a true
-    // mismatch (e.g. throw expressions getting auto-recovered against
-    // the wrong leaf, surfacing the first alternative in diagnostics).
+    // Phase 2b.D leaf-membership: type1 is accepted iff it matches one
+    // of the declared alternatives. We do this in two phases:
+    //
+    //   1. Structural / canonical check — exact equality, plus
+    //      recursive descent through nested narrowed-Any and Optional
+    //      sugar. This covers the common case (`Int → Int | String`,
+    //      `String → Int? | String`, `Int → (Int|String)|Bool`) and
+    //      most importantly is *side-effect-free*: it does not record
+    //      type variables, fixes, or any constraint-system mutation.
+    //
+    //   2. Fallback to `matchTypes` for anything structurally complex
+    //      (protocol composition leaves, classes with subtyping). We
+    //      track the constraint system's `Fixes` count and reject any
+    //      trial that grew it, so a bad-but-recoverable match doesn't
+    //      mask the true match further down the alternative list.
+    //
+    // The two-phase split matters because step 1 is enough for the
+    // throw-into-narrowed case (`throw E2 // throws(E1 | E2)`), which
+    // is exactly the spot where the constraint solver was getting
+    // confused enough to produce a "failed to produce diagnostic" ICE.
+    auto canType1 = type1->getCanonicalType();
+    std::function<bool(Type)> structuralLeaf = [&](Type container) -> bool {
+      if (container->getCanonicalType() == canType1)
+        return true;
+      Type inner = container;
+      if (auto *ext = container->getAs<ExistentialType>())
+        inner = ext->getConstraintType();
+      if (auto *na = inner->getAs<NarrowedAnyType>()) {
+        for (Type alt : na->getAlternatives())
+          if (structuralLeaf(alt))
+            return true;
+      }
+      if (Type optInner = inner->getOptionalObjectType()) {
+        if (structuralLeaf(optInner))
+          return true;
+      }
+      return false;
+    };
+    for (auto alt : layout.getNarrowedAlternatives()) {
+      if (structuralLeaf(alt))
+        return getTypeMatchSuccess();
+    }
+
     TypeMatchOptions tryflags = subflags;
     auto fixesBefore = Fixes.size();
     for (auto alt : layout.getNarrowedAlternatives()) {
@@ -4186,8 +4223,6 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
                               tryflags, locator);
       if (trial.isSuccess() && Fixes.size() == fixesBefore)
         return trial;
-      // Drop any fixes the failed trial recorded so the next alternative
-      // sees a clean slate.
       while (Fixes.size() > fixesBefore)
         Fixes.pop_back();
     }

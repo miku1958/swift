@@ -6179,6 +6179,24 @@ TypeChecker::containsProtocol(Type T, ProtocolDecl *Proto,
         return std::make_pair(true, ProtocolConformanceRef::forInvalid());
     }
 
+    // Phase 2b.D: a narrowed `Any` "contains" a protocol when each of
+    // its declared alternatives conforms. This unblocks the do-catch
+    // implicit rethrow check for `throws(A | B) → any Error`: the
+    // residual carries the union, and the runtime can dispatch through
+    // the leaf's own conformance because the existential layout
+    // matches plain `Any`.
+    if (layout.isNarrowedAny()) {
+      bool allConform = true;
+      for (Type alt : layout.getNarrowedAlternatives()) {
+        if (!lookupConformance(alt, Proto, /*allowMissing=*/false)) {
+          allConform = false;
+          break;
+        }
+      }
+      if (allConform)
+        return std::make_pair(true, ProtocolConformanceRef::forInvalid());
+    }
+
     auto conformance =
         (allowMissing ? ProtocolConformanceRef::forMissingOrInvalid(T, Proto)
                       : ProtocolConformanceRef::forInvalid());

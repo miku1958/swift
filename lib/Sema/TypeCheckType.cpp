@@ -4742,7 +4742,33 @@ NeverNullType TypeResolver::resolveASTFunctionType(
                !options.contains(TypeResolutionFlags::SilenceDiagnostics)) {
       auto thrownTyInContext = GenericEnvironment::mapTypeIntoEnvironment(
         resolution.getGenericSignature().getGenericEnvironment(), thrownTy);
-      if (!checkConformance(thrownTyInContext, ctx.getErrorDecl())) {
+
+      // Phase 2b.D: `throws(A | B)` is valid iff every alternative
+      // conforms to Error. The narrowed `Any` itself is not (yet) a
+      // conformer — that would require runtime witness-table machinery
+      // (Phase 3). Decomposing here keeps typed-throws working without
+      // committing to synthesised conformance ABI: the thrown value is
+      // an existential whose dynamic type is one of the leaves, and
+      // catch-site `as Error` opens the existential and dispatches on
+      // the leaf's own Error conformance.
+      auto checkThrownErrorType = [&](Type ty) -> bool {
+        Type peeled = ty;
+        if (auto *ext = peeled->getAs<ExistentialType>())
+          peeled = ext->getConstraintType();
+        if (auto *na = peeled->getAs<NarrowedAnyType>()) {
+          for (Type alt : na->getAlternatives()) {
+            auto altInCtx = GenericEnvironment::mapTypeIntoEnvironment(
+              resolution.getGenericSignature().getGenericEnvironment(),
+              alt);
+            if (!checkConformance(altInCtx, ctx.getErrorDecl()))
+              return false;
+          }
+          return true;
+        }
+        return bool(checkConformance(ty, ctx.getErrorDecl()));
+      };
+
+      if (!checkThrownErrorType(thrownTyInContext)) {
         diagnoseInvalid(
             thrownTypeRepr, thrownTypeRepr->getLoc(), diag::thrown_type_not_error,
             thrownTy);

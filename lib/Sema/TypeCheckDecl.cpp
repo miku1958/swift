@@ -2518,7 +2518,25 @@ InterfaceTypeRequest::evaluate(Evaluator &eval, ValueDecl *D) const {
       ProtocolDecl *errorProto = Context.getErrorDecl();
       if (thrownTy && !thrownTy->hasError() && errorProto) {
         Type thrownTyInContext = AFD->mapTypeIntoEnvironment(thrownTy);
-        if (!checkConformance(thrownTyInContext, errorProto)) {
+
+        // Phase 2b.D: `throws(A | B)` is valid iff each alternative
+        // conforms to Error. Mirror of TypeCheckType.cpp's check.
+        auto isValidThrownErrorType = [&](Type ty) -> bool {
+          Type peeled = ty;
+          if (auto *ext = peeled->getAs<ExistentialType>())
+            peeled = ext->getConstraintType();
+          if (auto *na = peeled->getAs<NarrowedAnyType>()) {
+            for (Type alt : na->getAlternatives()) {
+              auto altInCtx = AFD->mapTypeIntoEnvironment(alt);
+              if (!checkConformance(altInCtx, errorProto))
+                return false;
+            }
+            return true;
+          }
+          return bool(checkConformance(ty, errorProto));
+        };
+
+        if (!isValidThrownErrorType(thrownTyInContext)) {
           SourceLoc loc;
           if (auto thrownTypeRepr = AFD->getThrownTypeRepr())
             loc = thrownTypeRepr->getLoc();
