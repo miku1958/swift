@@ -730,6 +730,168 @@ SILGenModule::getWitnessTable(NormalProtocolConformance *conformance) {
   return table;
 }
 
+/// Phase 3.F slice 6: synthesize a per-leaf dispatch body for
+/// `Equatable.==` on a narrowed-Any type.
+///
+/// On entry `entry` already has the three SILFunctionArguments
+/// [lhs: $*τ_0_0, rhs: $*τ_0_0, selfMeta: $@thick τ_0_0.Type]. We
+/// emit, for each declared leaf L:
+///   1. alloc_stack a slot for L
+///   2. checked_cast_addr_br copy_on_success τ_0_0 → L on lhs
+///   3. on lhs-success: alloc_stack rhs slot, try cast rhs → L
+///      - both-success: witness_method on L's Equatable conformance,
+///        apply, br exit(result)
+///      - rhs-fail: cleanup, br false-exit (different leaves are
+///        never equal)
+///   4. on lhs-fail: dealloc, br next leaf (or false-exit if last)
+///
+/// Returns true if dispatch was emitted; false if the requirement
+/// is not Equatable.== (caller should fall back to trap-stub).
+static bool tryEmitNarrowedAnyEquatableEqDispatch(
+    SILGenModule &SGM, SILFunction *thunk, SILBasicBlock *entry,
+    BuiltinProtocolConformance *conformance, SILDeclRef reqRef) {
+  ASTContext &ctx = SGM.getASTContext();
+  auto *equatable = ctx.getProtocol(KnownProtocolKind::Equatable);
+  if (conformance->getProtocol() != equatable)
+    return false;
+
+  // Detect Equatable's `==` (only single requirement of the protocol
+  // in v1 stdlib that is a static operator; identified by `isOperator`
+  // + base identifier "==").
+  auto *funcReq = dyn_cast_or_null<AbstractFunctionDecl>(reqRef.getDecl());
+  if (!funcReq || !funcReq->isOperator() ||
+      funcReq->getBaseIdentifier().str() != "==")
+    return false;
+
+  Type peeled = conformance->getType();
+  if (auto *ext = peeled->getAs<ExistentialType>())
+    peeled = ext->getConstraintType();
+  auto *narrowedAny = peeled->getAs<NarrowedAnyType>();
+  if (!narrowedAny)
+    return false;
+  auto leaves = narrowedAny->getAlternatives();
+  if (leaves.empty())
+    return false;
+
+  auto loc = RegularLocation::getModuleLocation();
+
+  auto fnArgs = entry->getArguments();
+  assert(fnArgs.size() == 3 &&
+         "Equatable.== thunk should have lhs/rhs/selfMeta args");
+  SILValue lhsAddr = fnArgs[0];
+  SILValue rhsAddr = fnArgs[1];
+  // fnArgs[2] (selfMeta) unused — we synthesize per-leaf metatypes.
+
+  // Bool / i1 SIL types.
+  auto *boolDecl = ctx.getBoolDecl();
+  auto silBoolTy = SILType::getPrimitiveObjectType(
+      boolDecl->getDeclaredInterfaceType()->getCanonicalType());
+  auto i1Ty = SILType::getBuiltinIntegerType(1, ctx);
+
+  // Source archetype for τ_0_0 in this thunk's environment.
+  auto sig = thunk->getLoweredFunctionType()->getInvocationGenericSignature();
+  auto srcArchetype = thunk->getGenericEnvironment()
+      ->mapTypeIntoEnvironment(sig.getGenericParams()[0])
+      ->getCanonicalType();
+
+  // Exit block — phi takes Bool result.
+  auto *exitBB = thunk->createBasicBlock();
+  auto *resultPhi =
+      exitBB->createPhiArgument(silBoolTy, OwnershipKind::None);
+  {
+    SILBuilder B(exitBB);
+    B.createReturn(loc, resultPhi);
+  }
+
+  // False-exit block: build false Bool, br exit.
+  auto *falseExitBB = thunk->createBasicBlock();
+  {
+    SILBuilder B(falseExitBB);
+    auto *zero = B.createIntegerLiteral(loc, i1Ty, 0);
+    auto *boolStruct = B.createStruct(loc, silBoolTy, {zero});
+    B.createBranch(loc, exitBB, {boolStruct});
+  }
+
+  // SIL signature for Equatable.== — used to type witness_method.
+  auto eqInfo = SGM.Types.getConstantInfo(
+      TypeExpansionContext::minimal(), reqRef);
+  auto eqSILTy = SILType::getPrimitiveObjectType(eqInfo.SILFnType);
+
+  SILBasicBlock *currentBB = entry;
+  for (size_t i = 0; i < leaves.size(); i++) {
+    auto leafTy = leaves[i]->getCanonicalType();
+    auto silLeafAddrTy = SILType::getPrimitiveAddressType(leafTy);
+
+    SILBuilder B(currentBB);
+    auto *lhsLeafSlot = B.createAllocStack(loc, silLeafAddrTy);
+
+    auto *lhsOkBB = thunk->createBasicBlock();
+    auto *lhsFailBB = thunk->createBasicBlock();
+
+    B.createCheckedCastAddrBranch(loc, CheckedCastInstOptions(),
+        CastConsumptionKind::CopyOnSuccess,
+        lhsAddr, srcArchetype,
+        lhsLeafSlot, leafTy,
+        lhsOkBB, lhsFailBB);
+
+    // lhsOk: try rhs.
+    SILBuilder okB(lhsOkBB);
+    auto *rhsLeafSlot = okB.createAllocStack(loc, silLeafAddrTy);
+    auto *bothOkBB = thunk->createBasicBlock();
+    auto *rhsFailBB = thunk->createBasicBlock();
+    okB.createCheckedCastAddrBranch(loc, CheckedCastInstOptions(),
+        CastConsumptionKind::CopyOnSuccess,
+        rhsAddr, srcArchetype,
+        rhsLeafSlot, leafTy,
+        bothOkBB, rhsFailBB);
+
+    // bothOk: witness_method dispatch.
+    SILBuilder bothB(bothOkBB);
+    auto leafConf = swift::lookupConformance(leafTy, equatable);
+    assert(leafConf && "leaf was checked to conform at lookup time");
+
+    auto witness = bothB.createWitnessMethod(loc, leafTy, leafConf,
+                                             reqRef, eqSILTy);
+
+    auto subs = SubstitutionMap::getProtocolSubstitutions(
+        equatable, leafTy, leafConf);
+
+    auto metaTy = SILType::getPrimitiveObjectType(
+        CanMetatypeType::get(leafTy, MetatypeRepresentation::Thick));
+    auto *metaVal = bothB.createMetatype(loc, metaTy);
+
+    auto *applyResult = bothB.createApply(loc, witness, subs,
+        {lhsLeafSlot, rhsLeafSlot, metaVal});
+
+    bothB.createDestroyAddr(loc, lhsLeafSlot);
+    bothB.createDestroyAddr(loc, rhsLeafSlot);
+    bothB.createDeallocStack(loc, rhsLeafSlot);
+    bothB.createDeallocStack(loc, lhsLeafSlot);
+    bothB.createBranch(loc, exitBB, {applyResult});
+
+    // rhsFail: lhs is owned (copied by lhs cast), rhs slot is uninit.
+    // Different leaves are never equal — return false.
+    SILBuilder rhsFB(rhsFailBB);
+    rhsFB.createDestroyAddr(loc, lhsLeafSlot);
+    rhsFB.createDeallocStack(loc, rhsLeafSlot);
+    rhsFB.createDeallocStack(loc, lhsLeafSlot);
+    rhsFB.createBranch(loc, falseExitBB);
+
+    // lhsFail: lhs slot uninit (copy_on_success leaves source alone).
+    SILBuilder lhsFB(lhsFailBB);
+    lhsFB.createDeallocStack(loc, lhsLeafSlot);
+    if (i + 1 < leaves.size()) {
+      auto *nextBB = thunk->createBasicBlock();
+      lhsFB.createBranch(loc, nextBB);
+      currentBB = nextBB;
+    } else {
+      lhsFB.createBranch(loc, falseExitBB);
+    }
+  }
+
+  return true;
+}
+
 SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
     BuiltinProtocolConformance *conformance) {
   // Phase 3.F slice 2+3 stub: emit an empty SILWitnessTable so the
@@ -847,8 +1009,14 @@ SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
            fnConv.getParameterSILTypes(expansion))
         entry->createFunctionArgument(thunk->mapTypeIntoEnvironment(paramTy));
 
-      SILBuilder builder(entry);
-      builder.createUnreachable(RegularLocation::getModuleLocation());
+      // Phase 3.F slice 6: try real per-leaf dispatch for
+      // Equatable.==. Falls through to trap-stub for any other
+      // requirement (Hashable.hash(into:) etc.) — tracked in todo.
+      if (!tryEmitNarrowedAnyEquatableEqDispatch(*this, thunk, entry,
+                                                 conformance, reqRef)) {
+        SILBuilder builder(entry);
+        builder.createUnreachable(RegularLocation::getModuleLocation());
+      }
     }
 
     entries.push_back(SILWitnessTable::MethodWitness{reqRef, thunk});

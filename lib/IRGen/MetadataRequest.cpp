@@ -3456,7 +3456,21 @@ IRGenFunction::emitTypeMetadataRef(CanType type,
   if (SelfTypeIsExact && SelfType == type) {
     return MetadataResponse::forComplete(getDynamicSelfMetadata());
   }
-  
+
+  // Phase 2b.D / 3.F slice 6: a narrowed-Any type's run-time shape is
+  // exactly `Any` (the closed-conformer set is a Sema-only construct).
+  // Bypass the mangled-name accessor cache (which would require the
+  // runtime to decode `XN`) and emit the `Any` singleton metadata
+  // directly — this stays correct for system runtimes that lack
+  // `createNarrowedAnyType`. The decision matters whenever an apply
+  // substitutes τ → narrowed-Any (witness-method dispatch, generic
+  // polymorphism, etc.).
+  if (auto *exTy = type->getAs<ExistentialType>()) {
+    if (isa<NarrowedAnyType>(exTy->getConstraintType().getPointer())) {
+      return emitDirectTypeMetadataRef(*this, type, request);
+    }
+  }
+
   if (type->hasArchetype() ||
       !shouldTypeMetadataAccessUseAccessor(IGM, type) ||
       isa<PackType>(type) ||
