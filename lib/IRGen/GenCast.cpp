@@ -94,6 +94,27 @@ llvm::Value *irgen::emitCheckedCast(IRGenFunction &IGF,
   // here we avoid the destructive call entirely. The static check
   // is sound because peeledSrc is concrete: its leaf-membership is
   // a compile-time fact.
+  // Recursively flatten a narrowed-Any (and any nested narrowed-Any
+  // alternatives) into the canonical types of its concrete leaves.
+  // Leaf-membership at runtime compares metadata pointers, and a
+  // nested narrowed-Any leaf reuses the Any singleton — so a value
+  // whose dynamic metadata is e.g. `Int.self` is a valid member of
+  // `W = V | Bool` (V = Int|String) only if we test against
+  // {Int.self, String.self, Bool.self}, not {V.metadata, Bool.self}.
+  std::function<void(CanType, llvm::SmallVectorImpl<CanType> &)>
+      collectDeepLeafCanTypes =
+          [&](CanType ty, llvm::SmallVectorImpl<CanType> &out) {
+            CanType p = ty;
+            if (auto *e = dyn_cast<ExistentialType>(p.getPointer()))
+              p = e->getConstraintType()->getCanonicalType();
+            if (auto *n = dyn_cast<NarrowedAnyType>(p.getPointer())) {
+              for (auto a : n->getAlternatives())
+                collectDeepLeafCanTypes(a->getCanonicalType(), out);
+              return;
+            }
+            out.push_back(ty);
+          };
+
   {
     CanType peeledTargetEarly = targetType;
     if (auto *ext = dyn_cast<ExistentialType>(peeledTargetEarly.getPointer()))
@@ -109,9 +130,11 @@ llvm::Value *irgen::emitCheckedCast(IRGenFunction &IGF,
                               isa<NarrowedAnyType>(peeledSrcEarly.getPointer()) ||
                               peeledSrcEarly->hasArchetype();
       if (!srcIsExistential) {
+        llvm::SmallVector<CanType, 8> deepLeaves;
+        collectDeepLeafCanTypes(CanType(naEarly), deepLeaves);
         bool isLeaf = false;
-        for (auto leaf : naEarly->getAlternatives()) {
-          if (leaf->getCanonicalType() == peeledSrcEarly) {
+        for (auto leaf : deepLeaves) {
+          if (leaf == peeledSrcEarly) {
             isLeaf = true;
             break;
           }
@@ -177,7 +200,6 @@ llvm::Value *irgen::emitCheckedCast(IRGenFunction &IGF,
     peeledTarget = ext->getConstraintType()->getCanonicalType();
 
   if (auto *na = dyn_cast<NarrowedAnyType>(peeledTarget.getPointer())) {
-    auto leaves = na->getAlternatives();
     // dest is opaque-typed at this point (bitcast at line 85);
     // read the metadata from offset = fixed-buffer-size (24 bytes
     // in 64-bit Any layout). Use a byte GEP to avoid round-tripping
@@ -192,10 +214,15 @@ llvm::Value *irgen::emitCheckedCast(IRGenFunction &IGF,
                                            IGF.IGM.TypeMetadataPtrTy,
                                            IGF.IGM.getPointerAlignment());
 
+    // Compare against deep leaves: a nested narrowed-Any alternative
+    // contributes its own concrete leaves' metadata pointers, not its
+    // own (which is the Any singleton at runtime and would never
+    // match a concrete dynamic type).
+    llvm::SmallVector<CanType, 8> deepLeaves;
+    collectDeepLeafCanTypes(CanType(na), deepLeaves);
     llvm::Value *membership =
         llvm::ConstantInt::getFalse(IGF.IGM.getLLVMContext());
-    for (auto leaf : leaves) {
-      auto leafCanTy = leaf->getCanonicalType();
+    for (auto leafCanTy : deepLeaves) {
       auto *leafMeta = IGF.emitTypeMetadataRef(leafCanTy);
       auto *eq = IGF.Builder.CreateICmpEQ(dynMeta, leafMeta);
       membership = IGF.Builder.CreateOr(membership, eq);

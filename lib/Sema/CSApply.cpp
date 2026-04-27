@@ -4152,9 +4152,31 @@ namespace {
     /// statically excludes the target type. The runtime would always
     /// return nil / always trap / always be false respectively, but
     /// pre-slice-18 the cast type-checked silently.
+    /// Recursively expand a narrowed-Any into its set of "deep leaves":
+    /// every leaf, plus any leaves of nested narrowed-Any alternatives.
+    /// Cast feasibility depends on the actual runtime leaf, not on the
+    /// surface spelling, so partial-overlap detection has to walk into
+    /// nested narrowed-Any alternatives. Spelling-as-identity still
+    /// applies to type identity / dispatch / mangling — this is a
+    /// cast-feasibility-only flattening.
+    void collectDeepLeaves(Type ty,
+                           llvm::SmallPtrSetImpl<TypeBase *> &out) {
+      Type peeled = ty;
+      if (auto *ext = peeled->getAs<ExistentialType>())
+        peeled = ext->getConstraintType();
+      if (auto *na = peeled->getAs<NarrowedAnyType>()) {
+        for (auto alt : na->getAlternatives())
+          collectDeepLeaves(alt, out);
+        return;
+      }
+      out.insert(ty->getCanonicalType().getPointer());
+    }
+
     void warnIfNarrowedAnyCastIsProvablyEmpty(Expr *expr, Type fromType,
                                               Type toType,
-                                              unsigned diagSelect) {
+                                              unsigned diagSelect,
+                                              CheckedCastKind castKind =
+                                                  CheckedCastKind::Unresolved) {
       if (SuppressDiagnostics)
         return;
 
@@ -4184,17 +4206,19 @@ namespace {
       if (auto *na = peeledFrom->getAs<NarrowedAnyType>()) {
         if (peeledTo->isExistentialType() || peeledTo->hasArchetype()) {
           // Generic existential / opaque target — runtime must inspect.
-          // Exception: narrowed-Any-to-narrowed-Any. Compare leaf sets.
-          if (auto *naTo = peeledTo->getAs<NarrowedAnyType>()) {
-            llvm::SmallPtrSet<TypeBase *, 4> tgtLeaves;
-            for (auto leaf : naTo->getAlternatives())
-              tgtLeaves.insert(leaf->getCanonicalType().getPointer());
+          // Exception: narrowed-Any-to-narrowed-Any. Compare *deep*
+          // leaf sets so nested narrowed-Any alternatives flatten
+          // correctly (e.g. for `W = V | Bool` and `V = Int | String`,
+          // V→W must see {Int,String} ⊆ {Int,String,Bool} and warn
+          // widening, not "disjoint").
+          if (peeledTo->is<NarrowedAnyType>()) {
+            llvm::SmallPtrSet<TypeBase *, 8> srcDeep, tgtDeep;
+            collectDeepLeaves(peeledFrom, srcDeep);
+            collectDeepLeaves(peeledTo, tgtDeep);
             unsigned overlap = 0;
-            for (auto leaf : na->getAlternatives()) {
-              if (tgtLeaves.count(leaf->getCanonicalType().getPointer()))
+            for (auto *leaf : srcDeep)
+              if (tgtDeep.count(leaf))
                 ++overlap;
-            }
-            unsigned srcSize = na->getAlternatives().size();
             if (overlap == 0) {
               // Disjoint — statically empty.
               ctx.Diags.diagnose(expr->getLoc(),
@@ -4209,11 +4233,21 @@ namespace {
                                  fromType, leafOS.str());
               return;
             }
-            if (overlap == srcSize) {
-              // Every src leaf is in the tgt set — cast always succeeds.
-              ctx.Diags.diagnose(expr->getLoc(),
-                                 diag::narrowed_any_cast_widening_always_succeeds,
-                                 fromType, toType, diagSelect);
+            if (overlap == srcDeep.size()) {
+              // Every src deep leaf is in tgt's deep set — widening.
+              // Skip when the standard "conditional cast / forced cast
+              // / 'is' test always succeeds" diagnostic already fires
+              // (i.e. when typeCheckCheckedCast resolved this as a
+              // Coercion/BridgingCoercion). That diagnostic already
+              // gives the user the actionable "use 'as' instead" hint;
+              // the slice-18 leaf-set wording would be duplicate noise.
+              if (castKind != CheckedCastKind::Coercion &&
+                  castKind != CheckedCastKind::BridgingCoercion) {
+                ctx.Diags.diagnose(
+                    expr->getLoc(),
+                    diag::narrowed_any_cast_widening_always_succeeds,
+                    fromType, toType, diagSelect);
+              }
               return;
             }
             // Partial overlap — runtime decides per dynamic value.
@@ -4221,11 +4255,14 @@ namespace {
           }
           return;
         }
-        auto peeledToCanon = peeledTo->getCanonicalType();
-        for (auto leaf : na->getAlternatives()) {
-          if (leaf->getCanonicalType() == peeledToCanon)
-            return;
-        }
+        // Concrete target — check membership in src's deep leaf set so
+        // a leaf reachable through a nested narrowed-Any alternative
+        // (e.g. Int via V in W = V|Bool) doesn't false-positive as
+        // disjoint.
+        llvm::SmallPtrSet<TypeBase *, 8> srcDeep;
+        collectDeepLeaves(peeledFrom, srcDeep);
+        if (srcDeep.count(peeledTo->getCanonicalType().getPointer()))
+          return;
         ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_cast_nonleaf,
                            fromType, toType, diagSelect);
         llvm::SmallString<128> leafBuf;
@@ -4248,11 +4285,13 @@ namespace {
         if (peeledFrom->isExistentialType() || peeledFrom->hasArchetype() ||
             peeledFrom->is<NarrowedAnyType>())
           return;
-        auto peeledFromCanon = peeledFrom->getCanonicalType();
-        for (auto leaf : na->getAlternatives()) {
-          if (leaf->getCanonicalType() == peeledFromCanon)
-            return;
-        }
+        // Same deep-leaf check as Direction A's concrete branch — a
+        // concrete src may match a leaf nested inside one of the
+        // target's alternatives.
+        llvm::SmallPtrSet<TypeBase *, 8> tgtDeep;
+        collectDeepLeaves(peeledTo, tgtDeep);
+        if (tgtDeep.count(peeledFrom->getCanonicalType().getPointer()))
+          return;
         ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_cast_nonleaf_to,
                            fromType, toType, diagSelect);
         llvm::SmallString<128> leafBuf;
@@ -4282,7 +4321,8 @@ namespace {
           fromType, toType, CheckedCastContextKind::IsExpr, dc);
 
       // Phase 3.F slice 18: 2 = "is always false" diagSelect.
-      warnIfNarrowedAnyCastIsProvablyEmpty(expr, fromType, toType, 2);
+      warnIfNarrowedAnyCastIsProvablyEmpty(expr, fromType, toType, 2,
+                                           castKind);
 
       switch (castKind) {
       case CheckedCastKind::Unresolved:
@@ -4726,7 +4766,8 @@ namespace {
           fromType, toType, CheckedCastContextKind::ForcedCast, dc);
 
       // Phase 3.F slice 18: 1 = "always fails (traps)" diagSelect.
-      warnIfNarrowedAnyCastIsProvablyEmpty(expr, fromType, toType, 1);
+      warnIfNarrowedAnyCastIsProvablyEmpty(expr, fromType, toType, 1,
+                                           castKind);
 
       switch (castKind) {
         /// Invalid cast.
@@ -4807,7 +4848,8 @@ namespace {
           fromType, toType, CheckedCastContextKind::ConditionalCast, dc);
 
       // Phase 3.F slice 18: 0 = "always returns nil" diagSelect.
-      warnIfNarrowedAnyCastIsProvablyEmpty(expr, fromType, toType, 0);
+      warnIfNarrowedAnyCastIsProvablyEmpty(expr, fromType, toType, 0,
+                                           castKind);
 
       switch (castKind) {
       // Invalid cast.

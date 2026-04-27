@@ -1456,33 +1456,46 @@ Pattern *TypeChecker::coercePatternToType(
         if (auto *ext = peeledTo->getAs<ExistentialType>())
           peeledTo = ext->getConstraintType();
 
+        // Recursive deep-leaf collector — mirrors CSApply's
+        // collectDeepLeaves so nested narrowed-Any alternatives flatten
+        // correctly when a pattern cast straddles a `W = V | Bool` /
+        // `V = Int | String` shape.
+        std::function<void(Type, llvm::SmallPtrSetImpl<TypeBase *> &)>
+            collectDeep = [&](Type ty,
+                              llvm::SmallPtrSetImpl<TypeBase *> &out) {
+          Type p = ty;
+          if (auto *e = p->getAs<ExistentialType>())
+            p = e->getConstraintType();
+          if (auto *n = p->getAs<NarrowedAnyType>()) {
+            for (auto a : n->getAlternatives())
+              collectDeep(a, out);
+            return;
+          }
+          out.insert(ty->getCanonicalType().getPointer());
+        };
+
         bool emit = false;
         bool emitWidening = false;
-        if (auto *naTo = peeledTo->getAs<NarrowedAnyType>()) {
-          // Both sides narrowed-Any: warn on disjoint OR widening.
-          llvm::SmallPtrSet<TypeBase *, 4> tgtLeaves;
-          for (auto leaf : naTo->getAlternatives())
-            tgtLeaves.insert(leaf->getCanonicalType().getPointer());
+        if (peeledTo->is<NarrowedAnyType>()) {
+          // Both sides narrowed-Any: warn on disjoint OR widening using
+          // *deep* leaf sets so nested alternatives flatten.
+          llvm::SmallPtrSet<TypeBase *, 8> srcDeep, tgtDeep;
+          collectDeep(peeledFrom, srcDeep);
+          collectDeep(peeledTo, tgtDeep);
           unsigned overlap = 0;
-          for (auto leaf : na->getAlternatives()) {
-            if (tgtLeaves.count(leaf->getCanonicalType().getPointer()))
+          for (auto *leaf : srcDeep)
+            if (tgtDeep.count(leaf))
               ++overlap;
-          }
-          unsigned srcSize = na->getAlternatives().size();
           if (overlap == 0)
             emit = true;            // disjoint
-          else if (overlap == srcSize)
-            emitWidening = true;    // every src leaf is in tgt
+          else if (overlap == srcDeep.size())
+            emitWidening = true;    // every src deep leaf is in tgt
           // else: partial overlap — runtime decides
         } else if (!peeledTo->isExistentialType() && !peeledTo->hasArchetype()) {
-          auto peeledToCanon = peeledTo->getCanonicalType();
-          bool isLeaf = false;
-          for (auto leaf : na->getAlternatives()) {
-            if (leaf->getCanonicalType() == peeledToCanon) {
-              isLeaf = true;
-              break;
-            }
-          }
+          llvm::SmallPtrSet<TypeBase *, 8> srcDeep;
+          collectDeep(peeledFrom, srcDeep);
+          bool isLeaf =
+              srcDeep.count(peeledTo->getCanonicalType().getPointer()) != 0;
           emit = !isLeaf;
         }
 
@@ -1498,7 +1511,13 @@ Pattern *TypeChecker::coercePatternToType(
           diags.diagnose(IP->getLoc(),
                          diag::narrowed_any_cast_nonleaf_leaves,
                          type, leafOS.str());
-        } else if (emitWidening) {
+        } else if (emitWidening &&
+                   castKind != CheckedCastKind::Coercion &&
+                   castKind != CheckedCastKind::BridgingCoercion) {
+          // Same Coercion-dedup as CSApply: skip the slice-18 widening
+          // wording when the legacy "always succeeds" diagnostic already
+          // fires (typeCheckCheckedCast resolved this as a static
+          // upcast).
           diags.diagnose(IP->getLoc(),
                          diag::narrowed_any_cast_widening_always_succeeds,
                          type, IP->getCastType(), 0);
