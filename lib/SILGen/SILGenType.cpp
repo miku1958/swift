@@ -1793,7 +1793,7 @@ SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
       continue;
 
     auto baseConf = ctx.getBuiltinConformance(
-        conformance->getType(), baseProto,
+        conformance->getType()->getCanonicalType(), baseProto,
         BuiltinConformanceKind::NarrowedAnyDispatch);
     entries.push_back(SILWitnessTable::BaseProtocolWitness{
         baseProto, baseConf});

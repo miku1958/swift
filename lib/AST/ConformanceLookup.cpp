@@ -171,7 +171,7 @@ swift::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
         if (allConform)
           return ProtocolConformanceRef(
               ctx.getBuiltinConformance(
-                  type, protocol,
+                  type->getCanonicalType(), protocol,
                   BuiltinConformanceKind::NarrowedAnyDispatch));
       }
     }
