@@ -860,6 +860,16 @@ namespace {
             arr.push_back(Space::forUnknown(/*allowedButNotRequired*/true));
           }
 
+        } else if (auto *narrowed = getNarrowedAny(tp)) {
+          // A narrowed `Any` decomposes into one Type-space per declared
+          // alternative — exactly the closed conformer set. Pattern
+          // matching with `case _ as A:` consumes one alternative; once
+          // every alternative has a covering case the disjunct is empty
+          // and the switch is exhaustive without a `default`. Same shape
+          // as enum-case exhaustiveness, just over types instead of
+          // case names.
+          for (Type alt : narrowed->getAlternatives())
+            arr.push_back(Space::forType(alt, Identifier()));
         } else if (auto *TTy = tp->castTo<TupleType>()) {
           // Decompose each of the elements into its component type space.
           SmallVector<Space, 4> constElemSpaces;
@@ -881,9 +891,20 @@ namespace {
         return Space::forDisjunct(spaces);
       }
 
+      /// Peel an `ExistentialType(NarrowedAny)` wrapper down to the bare
+      /// `NarrowedAnyType`. Returns null if `tp` doesn't fit that shape.
+      static NarrowedAnyType *getNarrowedAny(Type tp) {
+        if (auto *na = tp->getAs<NarrowedAnyType>())
+          return na;
+        if (auto *ex = tp->getAs<ExistentialType>())
+          return ex->getConstraintType()->getAs<NarrowedAnyType>();
+        return nullptr;
+      }
+
       static bool canDecompose(Type tp) {
         return tp->is<TupleType>() || tp->isBool() ||
-               tp->getEnumOrBoundGenericEnum();
+               tp->getEnumOrBoundGenericEnum() ||
+               getNarrowedAny(tp);
       }
 
       // Search the space for a reason to downgrade exhaustiveness errors to
@@ -1462,8 +1483,24 @@ namespace {
           // consistency with the scrutinee's type.
           return Space::forType(IP->getType(), Identifier());
         }
+        case CheckedCastKind::ValueCast: {
+          // For exhaustiveness purposes, project a `case _ as A:` pattern
+          // as a Type-space for the *cast target* `A` (not the pattern's
+          // subject type). This lets a narrowed `Any` decomposition
+          // close out — its disjunct of leaf Type-spaces is consumed
+          // case-by-case — without changing what plain `Any` reports,
+          // since `Type(Any) − Type(Int)` still doesn't subtract to
+          // empty.
+          Type castTy = IP->getCastType();
+          if (auto *subPattern = IP->getSubPattern()) {
+            Space castSubSpace = projectPattern(subPattern);
+            if (castSubSpace.getKind() == SpaceKind::Type)
+              return Space::forType(castTy, castSubSpace.getPrintingName());
+            return castSubSpace;
+          }
+          return Space::forType(castTy, Identifier());
+        }
         case CheckedCastKind::Unresolved:
-        case CheckedCastKind::ValueCast:
         case CheckedCastKind::ArrayDowncast:
         case CheckedCastKind::DictionaryDowncast:
         case CheckedCastKind::SetDowncast:
