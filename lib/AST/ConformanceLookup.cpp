@@ -130,12 +130,14 @@ swift::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
     // existing forInvalid behavior — broadening would require each
     // protocol's own synth + leaf-conformance check.
     //
-    // Hashable specifically needs (a) base-protocol WT entry
-    // pointing to narrowed-Any:Equatable + (b) real per-leaf
-    // dispatch for `hash(into:)` (today's trap-stub-only WT crashes
-    // before reaching the trap because Set/Dict reads the
-    // base-protocol slot). Tracked as Phase 3.F slice 7 in todo.
-    if (protocol->isSpecificProtocol(KnownProtocolKind::Equatable)) {
+    // Hashable wire-up (slice 7 retry-4, post-slice-9):
+    // slice 9 fixed wrapping-generic metadata so Array<NarrowedAny>
+    // and friends can build their type metadata correctly. Set/Dict
+    // also need element-type metadata, which is now correct. Try
+    // wiring Hashable again with the slice-7 IRGen accessor +
+    // BaseProtocolWitness path.
+    if (protocol->isSpecificProtocol(KnownProtocolKind::Equatable) ||
+        protocol->isSpecificProtocol(KnownProtocolKind::Hashable)) {
       Type peeled = getConstraintType();
       if (auto *ext = peeled->getAs<ExistentialType>())
         peeled = ext->getConstraintType();

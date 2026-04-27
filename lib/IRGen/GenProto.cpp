@@ -2104,6 +2104,54 @@ void WitnessTableBuilderBase::defineAssociatedTypeWitnessTableAccessFunction(
   IGF.Builder.CreateRet(wtable);
 }
 
+/// Slice 7: emit a small accessor function for a NarrowedAnyDispatch
+/// base protocol witness. Signature matches
+/// AssociatedWitnessTableAccessFunction:
+///   (associatedType, self, parentWT) -> WitnessTable*
+/// Body: just call swift_getWitnessTable(baseMR, self, null) and return.
+/// Used as the resilient-witness payload for BaseProtocol slots.
+static llvm::Function *
+getNarrowedAnyDispatchBaseConfAccessor(
+    IRGenModule &IGM, BuiltinProtocolConformance *baseConf) {
+  IRGenMangler mangler(IGM.Context);
+  auto symbolName =
+      "_swift_narrowedAnyBaseConfAccessor_" +
+      mangler.mangleProtocolConformanceDescriptor(baseConf);
+
+  if (auto *existing = IGM.Module.getFunction(symbolName))
+    return existing;
+
+  auto *fnTy = llvm::FunctionType::get(
+      IGM.WitnessTablePtrTy,
+      {IGM.TypeMetadataPtrTy, IGM.TypeMetadataPtrTy, IGM.WitnessTablePtrTy},
+      /*isVarArg=*/false);
+  auto *accessor = llvm::Function::Create(
+      fnTy, llvm::GlobalValue::PrivateLinkage, symbolName, &IGM.Module);
+  accessor->setCallingConv(IGM.SwiftCC);
+  accessor->setDoesNotThrow();
+
+  IRGenFunction IGF(IGM, accessor);
+  if (IGM.DebugInfo)
+    IGM.DebugInfo->emitArtificialFunction(IGF, accessor);
+
+  // Args: (associatedType, self, parentWT) — for BaseProtocol the
+  // self parameter and the conforming type are the same; we pass
+  // self into swift_getWitnessTable.
+  auto *params = accessor->arg_begin();
+  llvm::Value *self = &*std::next(params);
+
+  auto *descriptor = IGM.getAddrOfProtocolConformanceDescriptor(baseConf);
+  auto *nullArgs = llvm::Constant::getNullValue(IGM.Int8PtrPtrTy);
+  auto *wt = IGF.Builder.CreateCall(
+      IGM.getGetWitnessTableFunctionPointer(),
+      {descriptor, self, nullArgs});
+  wt->setCallingConv(IGM.DefaultCC);
+  wt->setDoesNotThrow();
+  IGF.Builder.CreateRet(wt);
+
+  return accessor;
+}
+
 void ResilientWitnessTableBuilder::collectResilientWitnesses(
                       SmallVectorImpl<llvm::Constant *> &resilientWitnesses) {
   // Phase 3.F slice 2+3: a narrowed-Any-dispatch builtin conformance
@@ -2119,19 +2167,56 @@ void ResilientWitnessTableBuilder::collectResilientWitnesses(
            "only NarrowedAnyDispatch builtin conformance reaches the "
            "resilient witness-table builder");
     for (auto &entry : SILWT->getEntries()) {
-      if (entry.getKind() != SILWitnessTable::Method)
-        continue;
-      SILFunction *Func = entry.getMethodWitness().Witness;
-      llvm::Constant *witness = nullptr;
-      if (Func) {
-        if (Func->isAsync())
-          witness = IGM.getAddrOfAsyncFunctionPointer(Func);
-        else if (Func->getLoweredFunctionType()->isCalleeAllocatedCoroutine())
-          witness = IGM.getAddrOfCoroFunctionPointer(Func);
-        else
-          witness = IGM.getAddrOfSILFunction(Func, NotForDefinition);
+      if (entry.getKind() == SILWitnessTable::Method) {
+        SILFunction *Func = entry.getMethodWitness().Witness;
+        llvm::Constant *witness = nullptr;
+        if (Func) {
+          if (Func->isAsync())
+            witness = IGM.getAddrOfAsyncFunctionPointer(Func);
+          else if (Func->getLoweredFunctionType()->isCalleeAllocatedCoroutine())
+            witness = IGM.getAddrOfCoroFunctionPointer(Func);
+          else
+            witness = IGM.getAddrOfSILFunction(Func, NotForDefinition);
+        }
+        resilientWitnesses.push_back(witness);
+      } else if (entry.getKind() == SILWitnessTable::BaseProtocol) {
+        // Slice 7: emit a `\xFF\x07<offset>\x00` mangled-name struct
+        // pointing at an accessor function that returns
+        // swift_getWitnessTable(baseMR, self, null). The runtime
+        // (swift_getAssociatedConformanceWitnessSlow) recognizes
+        // the high-bit-set tag and the `\x07` kind byte, calls our
+        // accessor, and caches the resolved WT in the slot.
+        const auto &baseEntry = entry.getBaseProtocolWitness();
+        auto *baseConf = cast<BuiltinProtocolConformance>(baseEntry.Witness);
+        auto *accessor = getNarrowedAnyDispatchBaseConfAccessor(IGM, baseConf);
+
+        ConstantInitBuilder cb(IGM);
+        auto sb = cb.beginStruct();
+        sb.setPacked(true);
+        sb.add(llvm::ConstantInt::get(IGM.Int8Ty, 255));
+        sb.add(llvm::ConstantInt::get(IGM.Int8Ty, 7));
+        sb.addCompactFunctionReference(accessor);
+        sb.addInt(IGM.Int8Ty, 0);
+
+        IRGenMangler mangler(IGM.Context);
+        auto symbolName = "_swift_narrowedAnyBaseConfMangledRef_" +
+                          mangler.mangleProtocolConformanceDescriptor(baseConf);
+        auto *var = sb.finishAndCreateGlobal(
+            symbolName, Alignment(2),
+            /*isConstant=*/true,
+            llvm::GlobalValue::PrivateLinkage);
+        var->setSection(IGM.getReflectionTypeRefSectionName());
+
+        // Set the AssociatedTypeMangledNameBit (low bit) so the
+        // runtime takes the mangled-name branch.
+        auto *addr = llvm::ConstantExpr::getBitCast(var, IGM.Int8PtrTy);
+        auto *bit = llvm::ConstantInt::get(
+            IGM.IntPtrTy,
+            ProtocolRequirementFlags::AssociatedTypeMangledNameBit);
+        addr = llvm::ConstantExpr::getGetElementPtr(IGM.Int8Ty, addr, bit);
+
+        resilientWitnesses.push_back(addr);
       }
-      resilientWitnesses.push_back(witness);
     }
     return;
   }

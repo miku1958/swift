@@ -955,6 +955,34 @@ SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
   SILGenFunctionBuilder funcBuilder(*this);
 
   auto *protocol = conformance->getProtocol();
+  ASTContext &ctx = getASTContext();
+
+  // Slice 7: emit BaseProtocolWitness entries first (matching the
+  // SILWitnessVisitor canonical layout — base protocols come before
+  // method requirements). For each refined protocol that requires
+  // a witness table (e.g. Hashable refines Equatable), construct
+  // a sibling NarrowedAnyDispatch builtin conformance for the same
+  // narrowed-Any type and reference it.
+  for (const auto &reqt : protocol->getRequirementSignature().getRequirements()) {
+    if (reqt.getKind() != RequirementKind::Conformance)
+      continue;
+    auto type = reqt.getFirstType()->getCanonicalType();
+    auto parameter = dyn_cast<GenericTypeParamType>(type);
+    if (!parameter || parameter->getDepth() != 0 ||
+        parameter->getIndex() != 0)
+      continue;
+    auto *baseProto = reqt.getProtocolDecl();
+    if (!Lowering::TypeConverter::protocolRequiresWitnessTable(baseProto))
+      continue;
+
+    auto baseConf = ctx.getBuiltinConformance(
+        conformance->getType(), baseProto,
+        BuiltinConformanceKind::NarrowedAnyDispatch);
+    entries.push_back(SILWitnessTable::BaseProtocolWitness{
+        baseProto, baseConf});
+    // Trigger sibling WT emission via the same lazy path.
+    useConformance(nullptr, ProtocolConformanceRef(baseConf));
+  }
 
   for (auto *req : protocol->getProtocolRequirements()) {
     auto *funcReq = dyn_cast<AbstractFunctionDecl>(req);
