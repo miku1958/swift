@@ -4268,15 +4268,30 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
       }
     }
 
+    // Fallback: try matching type1 against each alternative in turn.
+    // A failed trial may have recorded fixes (and corresponding trail
+    // entries when solverState is active). Roll those back precisely
+    // so the next alternative gets a clean slate. When the solver is
+    // active, undo the trail back to the snapshot — that consults
+    // each Change::undo() method, which for `AddedFix` calls into
+    // `removeFix`. When the solver is inactive (direct simplifier
+    // call, no trail), there is no trail to consult, but `Fixes` may
+    // still have accumulated entries we need to drop.
     TypeMatchOptions tryflags = subflags;
-    auto fixesBefore = Fixes.size();
     for (auto alt : layout.getNarrowedAlternatives()) {
+      auto fixesBefore = Fixes.size();
+      uint64_t trailBefore =
+          solverState ? solverState->Trail.size() : 0;
       auto trial = matchTypes(type1, alt, ConstraintKind::Subtype,
                               tryflags, locator);
       if (trial.isSuccess() && Fixes.size() == fixesBefore)
         return trial;
-      while (Fixes.size() > fixesBefore)
-        Fixes.pop_back();
+      if (solverState) {
+        solverState->Trail.undo(trailBefore);
+      } else {
+        while (Fixes.size() > fixesBefore)
+          Fixes.pop_back();
+      }
     }
     return getTypeMatchFailure(locator);
   }
