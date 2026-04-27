@@ -1744,7 +1744,7 @@ static bool tryEmitNarrowedAnyHashableHashIntoDispatch(
 
 SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
     BuiltinProtocolConformance *conformance) {
-  // Phase 3.F slice 1-14: synthesize the SILWitnessTable for a
+  // Phase 3.F slice 1-16: synthesize the SILWitnessTable for a
   // narrowed-Any conformance to a per-method-witness protocol
   // (Equatable, Hashable, Comparable, CustomStringConvertible,
   // Encodable, Decodable today). Layout:
@@ -1868,10 +1868,15 @@ SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
            fnConv.getParameterSILTypes(expansion))
         entry->createFunctionArgument(thunk->mapTypeIntoEnvironment(paramTy));
 
-      // Phase 3.F slice 6 / 7: try real per-leaf dispatch for the
-      // protocol's known requirements (Equatable.==, Hashable.hash,
-      // Hashable._rawHashValue). Falls through to trap-stub for any
-      // other requirement.
+      // Phase 3.F slice 6/7/11/12/13/14: try real per-leaf dispatch
+      // for the protocol's known requirements — Equatable.==,
+      // Hashable.hash(into:), Hashable._rawHashValue(seed:),
+      // Comparable.<, CustomStringConvertible.description.getter,
+      // Encodable.encode(to:), Decodable.init(from:). Falls through
+      // to `unreachable` for any other requirement (none reachable
+      // today because lookupExistentialConformance only synthesises
+      // these six protocols; future protocols would need a matching
+      // helper or hit this trap).
       if (!tryEmitNarrowedAnyEquatableEqDispatch(*this, thunk, entry,
                                                  conformance, reqRef) &&
           !tryEmitNarrowedAnyHashableHashIntoDispatch(*this, thunk, entry,
