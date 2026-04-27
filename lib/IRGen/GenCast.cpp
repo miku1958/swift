@@ -83,6 +83,56 @@ llvm::Value *irgen::emitCheckedCast(IRGenFunction &IGF,
 
   DynamicCastFlags flags = getDynamicCastFlags(consumptionKind, mode, options);
 
+  // Phase 3.F slice 17: compile-time fast path for narrowed-Any
+  // target with a concrete (non-existential) source whose static type
+  // is not in the leaf set. swift_dynamicCast would succeed
+  // layout-wise (since narrowed-Any reuses the Any existential
+  // layout) and write the source value into dest's existential
+  // buffer, but the slice-15 leaf-membership post-check would then
+  // return false — leaking the value already written into dest
+  // (e.g. a class instance with a live retain). By short-circuiting
+  // here we avoid the destructive call entirely. The static check
+  // is sound because peeledSrc is concrete: its leaf-membership is
+  // a compile-time fact.
+  {
+    CanType peeledTargetEarly = targetType;
+    if (auto *ext = dyn_cast<ExistentialType>(peeledTargetEarly.getPointer()))
+      peeledTargetEarly = ext->getConstraintType()->getCanonicalType();
+    if (auto *naEarly =
+            dyn_cast<NarrowedAnyType>(peeledTargetEarly.getPointer())) {
+      CanType peeledSrcEarly = srcType;
+      if (auto *ext = dyn_cast<ExistentialType>(peeledSrcEarly.getPointer()))
+        peeledSrcEarly = ext->getConstraintType()->getCanonicalType();
+      bool srcIsExistential = peeledSrcEarly->isExistentialType() ||
+                              peeledSrcEarly->isAny() ||
+                              peeledSrcEarly->isAnyObject() ||
+                              isa<NarrowedAnyType>(peeledSrcEarly.getPointer()) ||
+                              peeledSrcEarly->hasArchetype();
+      if (!srcIsExistential) {
+        bool isLeaf = false;
+        for (auto leaf : naEarly->getAlternatives()) {
+          if (leaf->getCanonicalType() == peeledSrcEarly) {
+            isLeaf = true;
+            break;
+          }
+        }
+        if (!isLeaf) {
+          // For TakeAlways consumption, swift_dynamicCast would
+          // destroy src regardless of result. Since we are
+          // short-circuiting that call, we must perform the destroy
+          // ourselves to preserve refcount semantics. CopyOnSuccess
+          // and TakeOnSuccess preserve src on failure, so no destroy
+          // is needed in those modes.
+          if (consumptionKind == CastConsumptionKind::TakeAlways) {
+            auto *srcMetaForDestroy = IGF.emitTypeMetadataRef(srcType);
+            emitDestroyCall(IGF, srcMetaForDestroy, src);
+          }
+          return llvm::ConstantInt::getFalse(IGF.IGM.getLLVMContext());
+        }
+      }
+    }
+  }
+
   // Cast both addresses to opaque pointer type.
   dest = IGF.Builder.CreateElementBitCast(dest, IGF.IGM.OpaqueTy);
   src = IGF.Builder.CreateElementBitCast(src, IGF.IGM.OpaqueTy);
@@ -150,6 +200,29 @@ llvm::Value *irgen::emitCheckedCast(IRGenFunction &IGF,
       auto *eq = IGF.Builder.CreateICmpEQ(dynMeta, leafMeta);
       membership = IGF.Builder.CreateOr(membership, eq);
     }
+
+    // Phase 3.F slice 17: when the underlying cast succeeded but
+    // the dynamic value is not in the leaf set (e.g. a generic
+    // `func tryCast<T>(_ x: T) -> V?` instantiated at T=Witness
+    // and V = Int|String), swift_dynamicCast has already written
+    // the value into dest's existential buffer. Returning false
+    // without destroying the dest contents leaks any refcount /
+    // boxed allocation that was just installed. Use the dest
+    // existential's destroy value-witness to deinitialise the
+    // buffer through whichever inline-vs-boxed path the dynamic
+    // metadata describes.
+    auto *needDestroy = IGF.Builder.CreateAnd(
+        result, IGF.Builder.CreateNot(membership));
+    auto *destroyBB = IGF.createBasicBlock("narrowed_any_nonleaf.destroy");
+    auto *contBB = IGF.createBasicBlock("narrowed_any_nonleaf.cont");
+    IGF.Builder.CreateCondBr(needDestroy, destroyBB, contBB);
+
+    IGF.Builder.emitBlock(destroyBB);
+    auto destSILTy = SILType::getPrimitiveAddressType(targetType);
+    emitDestroyCall(IGF, destSILTy, dest);
+    IGF.Builder.CreateBr(contBB);
+
+    IGF.Builder.emitBlock(contBB);
     result = IGF.Builder.CreateAnd(result, membership);
   }
 
