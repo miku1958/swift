@@ -1327,8 +1327,11 @@ namespace {
       // `case _ as Bool:` fix-it. Without this, the user sees
       // "add missing case: 'true'" / "add missing case: 'false'",
       // which is a misleading suggestion for narrowed-Any switches —
-      // the right shape is `case _ as Bool:`. Pre-collect the missing
-      // spaces and detect the Bool decomposition pattern.
+      // the right shape is `case _ as Bool:`. (Enum-leaf folding is
+      // a Phase-3 follow-up — would need a deeper SpaceEngine
+      // integration to detect "all enum cases of leaf E are missing"
+      // since Constructor spaces here can also represent partial
+      // decompositions of other leaves.)
       bool subjectIsNarrowedAny = false;
       bool boolIsLeaf = false;
       auto subjectType = Switch->getSubjectExpr()->getType();
@@ -1369,7 +1372,7 @@ namespace {
           // the `false` half. Both must be missing for the fold to
           // apply, so both will be visited; we deduplicate here.
           if (!space.getBoolValue())
-            return; // already emitted on the `true` visit
+            return;
           llvm::StringRef caseStr = "_ as Bool";
           fixItOS << tok::kw_case << " " << caseStr << ":\n"
                   << placeholder << "\n";
