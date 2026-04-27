@@ -100,8 +100,18 @@ enum class BuiltinConformanceKind {
   // A missing conformance that we have nonetheless synthesized so that
   // we can diagnose it later.
   Missing,
+  // A synthesized conformance for a narrowed-Any type to a non-marker /
+  // non-self-conforming protocol. Witnesses are dispatched at runtime
+  // by opening the existential, comparing metadata, and forwarding to
+  // the leaf's own conformance. Phase 3.F (route 1) — the conformance
+  // kind is reserved here so AST/serialization can carry it; SIL synth
+  // and IRGen witness-table emission for this kind are not yet wired
+  // up, so `lookupExistentialConformance` does *not* return one in
+  // production. Tagged so that any premature consumer is caught by an
+  // assertion rather than silently lowering as a missing conformance.
+  NarrowedAnyDispatch,
 
-  Last_Kind = Missing
+  Last_Kind = NarrowedAnyDispatch
 };
 
 enum : unsigned {
@@ -1296,6 +1306,7 @@ public:
   bool isInvalid() const {
     switch (getBuiltinConformanceKind()) {
     case BuiltinConformanceKind::Synthesized:
+    case BuiltinConformanceKind::NarrowedAnyDispatch:
       return false;
     case BuiltinConformanceKind::Missing:
       return true;
