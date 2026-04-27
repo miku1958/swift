@@ -225,6 +225,19 @@ std::string IRGenMangler::mangleProtocolConformanceDescriptor(
   if (isa<NormalProtocolConformance>(conformance)) {
     appendProtocolConformance(conformance);
     appendOperator("Mc");
+  } else if (auto *bc = dyn_cast<BuiltinProtocolConformance>(conformance)) {
+    // Phase 3.F slice 4: narrowed-Any-dispatch builtin conformance
+    // descriptor. Layout: <conformingType><protocolName>MX
+    // (parallel to the `WX` witness-table operator). The `MX`
+    // operator distinguishes the descriptor from the regular `Mc`
+    // (normal) and `MS` (self) shapes.
+    assert(bc->getBuiltinConformanceKind() ==
+               BuiltinConformanceKind::NarrowedAnyDispatch &&
+           "only narrowed-Any-dispatch builtin conformances have a "
+           "protocol-conformance-descriptor mangling today");
+    appendType(bc->getType()->getCanonicalType(), nullptr);
+    appendProtocolName(bc->getProtocol());
+    appendOperator("MX");
   } else {
     auto protocol = cast<SelfProtocolConformance>(conformance)->getProtocol();
     appendProtocolName(protocol);
@@ -253,6 +266,17 @@ std::string IRGenMangler::mangleProtocolConformanceInstantiationCache(
   if (isa<NormalProtocolConformance>(conformance)) {
     appendProtocolConformance(conformance);
     appendOperator("Mc");
+  } else if (auto *bc = dyn_cast<BuiltinProtocolConformance>(conformance)) {
+    // Phase 3.F slice 4: parallel to mangleProtocolConformanceDescriptor
+    // — emit the `MX` form for the narrowed-Any-dispatch builtin
+    // conformance, then the `MK` instantiation-cache suffix.
+    assert(bc->getBuiltinConformanceKind() ==
+               BuiltinConformanceKind::NarrowedAnyDispatch &&
+           "only narrowed-Any-dispatch builtin conformances have a "
+           "protocol-conformance-instantiation-cache mangling today");
+    appendType(bc->getType()->getCanonicalType(), nullptr);
+    appendProtocolName(bc->getProtocol());
+    appendOperator("MX");
   } else {
     auto protocol = cast<SelfProtocolConformance>(conformance)->getProtocol();
     appendProtocolName(protocol);
