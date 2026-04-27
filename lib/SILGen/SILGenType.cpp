@@ -735,9 +735,46 @@ SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
   // Phase 3.F slice 2+3 stub: emit an empty SILWitnessTable so the
   // mangled `WX` symbol gets defined. Real per-requirement thunk
   // synthesis is pending (route-1 cascade pinned in todo §六/3.F).
-  // For now, the witness table has zero entries — enough for the
-  // linker to resolve the symbol but any actual witness_method
-  // lookup at runtime would access an out-of-bounds slot.
+  // For now, the witness table has zero entries — link succeeds via
+  // the IRGen-side NarrowedAnyDispatchConformanceInfo runtime lookup
+  // (commit 06330b83), but `swift_getWitnessTable` returns a WT whose
+  // slots are uninitialized; `witness_method` calls into slot 0 would
+  // SIGSEGV at runtime.
+  //
+  // To finish this slice, populate `entries` with a Method entry per
+  // protocol requirement:
+  //
+  //   for (auto *req : conformance->getProtocol()->getProtocolRequirements()) {
+  //     auto *funcReq = dyn_cast<AbstractFunctionDecl>(req);
+  //     if (!funcReq) continue;
+  //
+  //     // Build the witness's SIL signature by substituting Self with
+  //     // the narrowed-Any conformance type. The convention must be
+  //     // @convention(witness_method: <protocol>) so the SIL verifier
+  //     // matches the requirement's lowered type.
+  //     auto reqRef = SILDeclRef(funcReq);
+  //     auto loweredReqType = Types.getConstantInfo(
+  //         TypeExpansionContext::minimal(), reqRef).SILFnType;
+  //
+  //     // Synthesize a [shared] SIL function with the substituted type.
+  //     // Body: open both existential operands, load metadata, compare,
+  //     // dispatch via checked_cast_addr_br + witness_method to the leaf
+  //     // (or trap-stub initially).
+  //     auto *thunk = synthesizeNarrowedAnyDispatchThunk(conformance,
+  //                                                      reqRef,
+  //                                                      loweredReqType);
+  //
+  //     entries.push_back(SILWitnessTable::MethodWitness{
+  //       reqRef,
+  //       thunk
+  //     });
+  //   }
+  //
+  // The thunk synth itself is the heavy lift — abstraction patterns
+  // for @in_guaranteed parameters, multi-leaf branching with proper
+  // successor blocks, and matching the witness_method calling
+  // convention. Trap-stub variant (just emit B.createUnreachable) is
+  // a smaller first step that converts SIGSEGV into a clean trap.
   assert(conformance->getBuiltinConformanceKind() ==
              BuiltinConformanceKind::NarrowedAnyDispatch &&
          "unexpected builtin conformance kind");
