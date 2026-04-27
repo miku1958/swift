@@ -4159,20 +4159,37 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
 
   // Phase 2b.D: narrowed `Any` membership check. The closed conformer
   // set replaces the usual "any conforming type" rule; type1 is
-  // accepted iff it is (recursively) one of the declared alternatives.
-  // Concrete-type1 only — a type-variable type1 would have been
-  // diverted to the unsolved-constraint path at the top of this
-  // function. Spelling-equality at the leaf is the primary check;
-  // sub-leaf relations follow normal `matchTypes` rules so that e.g.
-  // `Cat` flows into `Cat | String` even with non-trivial subtyping
-  // inside the leaf itself.
+  // accepted iff it matches one of the declared alternatives by
+  // canonical equality, or it is itself a member of a *nested*
+  // narrowed `Any` alternative (the depth-1 principle says spelling is
+  // identity, but a leaf still injects through a containing narrowed
+  // `Any` shape — `Int` flows into `(Int | String) | Bool`).
+  //
+  // We avoid `matchTypes` here on purpose — when invoked with fix
+  // recording enabled it will succeed on a bad-but-recoverable match,
+  // which made the first-alternative diagnostic leak through
+  // `throws(A | B)` checks. Canonical equality plus recursive descent
+  // gives the precise "structural leaf membership" the proposal
+  // describes, without involving the constraint solver's repair
+  // machinery.
   if (layout.isNarrowedAny()) {
+    // Try each declared alternative as a leaf injection target. Use the
+    // full `matchTypes` so protocol-conformance and Optional injections
+    // work the same way they do in any other position — but reject any
+    // trial that recorded a "fix", which would otherwise mask a true
+    // mismatch (e.g. throw expressions getting auto-recovered against
+    // the wrong leaf, surfacing the first alternative in diagnostics).
     TypeMatchOptions tryflags = subflags;
+    auto fixesBefore = Fixes.size();
     for (auto alt : layout.getNarrowedAlternatives()) {
       auto trial = matchTypes(type1, alt, ConstraintKind::Subtype,
                               tryflags, locator);
-      if (trial.isSuccess())
+      if (trial.isSuccess() && Fixes.size() == fixesBefore)
         return trial;
+      // Drop any fixes the failed trial recorded so the next alternative
+      // sees a clean slate.
+      while (Fixes.size() > fixesBefore)
+        Fixes.pop_back();
     }
     return getTypeMatchFailure(locator);
   }
