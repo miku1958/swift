@@ -4216,46 +4216,65 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
         return getTypeMatchSuccess();
     }
 
-    // Cross-shape narrowed → narrowed: only the *explicit* `as`
-    // coercion is accepted. The proposal forbids implicit cross-shape
-    // (rule 2 in §Overload resolution: passing `A | B` where `B | A`
-    // is expected must error and suggest `as`), so we restrict this
-    // path to anchors that are explicit `CoerceExpr`s. Without this
-    // restriction, every cross-shape narrowed → narrowed becomes
-    // implicit and the spelling-as-identity guarantee evaporates.
-    bool isExplicitCoerce = false;
-    if (auto anchor = locator.getAnchor()) {
-      if (auto *expr = anchor.dyn_cast<Expr *>())
-        isExplicitCoerce = isa<CoerceExpr>(expr);
-    }
-    if (isExplicitCoerce) {
-      Type type1Inner = type1;
-      if (auto *ext = type1->getAs<ExistentialType>())
-        type1Inner = ext->getConstraintType();
-      if (auto *na1 = type1Inner->getAs<NarrowedAnyType>()) {
-        bool everyAltIsLeaf = true;
-        for (Type alt1 : na1->getAlternatives()) {
-          bool found = false;
-          auto canAlt1 = alt1->getCanonicalType();
-          for (Type alt2 : layout.getNarrowedAlternatives()) {
-            std::function<bool(Type)> leaf2 = [&](Type c) -> bool {
-              if (c->getCanonicalType() == canAlt1)
-                return true;
-              Type ci = c;
-              if (auto *e = c->getAs<ExistentialType>())
-                ci = e->getConstraintType();
-              if (auto *n = ci->getAs<NarrowedAnyType>()) {
-                for (Type a : n->getAlternatives())
-                  if (leaf2(a))
-                    return true;
-              }
-              return false;
-            };
-            if (leaf2(alt2)) { found = true; break; }
-          }
-          if (!found) { everyAltIsLeaf = false; break; }
+    // Cross-shape narrowed → narrowed has two flavours:
+    //
+    //   (a) Subset/widening — every leaf of type1 also appears in
+    //       type2's leaf set, possibly proper subset
+    //       (`E1 | E2 → E1 | E2 | E3`). This is a *covariant subtype*
+    //       relationship: passing `E1 | E2` where `E1 | E2 | E3` is
+    //       expected can never lose dynamic type information. Phase
+    //       3.E function-type throws widening relies on this for
+    //       chained `throws(A) → throws(A|B) → throws(A|B|C)`. So we
+    //       accept it implicitly under Subtype / Conversion kinds.
+    //
+    //   (b) Reorder / mixed (e.g. `Dog | Cat → Cat | Dog`) — this is
+    //       cross-shape, *not* a subtype, just a value-level
+    //       reinterpretation. The proposal's spelling-as-identity
+    //       rule says these are *different types*; their values are
+    //       interchangeable only via an explicit `as`. So we keep the
+    //       "explicit `CoerceExpr` only" restriction for this flavour.
+    //
+    // We compute the cheap leaf-subset check first; if it's satisfied
+    // we accept. Otherwise we fall back to requiring the explicit
+    // anchor before continuing.
+    Type type1Inner = type1;
+    if (auto *ext = type1->getAs<ExistentialType>())
+      type1Inner = ext->getConstraintType();
+    if (auto *na1 = type1Inner->getAs<NarrowedAnyType>()) {
+      bool everyAltIsLeaf = true;
+      for (Type alt1 : na1->getAlternatives()) {
+        bool found = false;
+        auto canAlt1 = alt1->getCanonicalType();
+        for (Type alt2 : layout.getNarrowedAlternatives()) {
+          std::function<bool(Type)> leaf2 = [&](Type c) -> bool {
+            if (c->getCanonicalType() == canAlt1)
+              return true;
+            Type ci = c;
+            if (auto *e = c->getAs<ExistentialType>())
+              ci = e->getConstraintType();
+            if (auto *n = ci->getAs<NarrowedAnyType>()) {
+              for (Type a : n->getAlternatives())
+                if (leaf2(a))
+                  return true;
+            }
+            return false;
+          };
+          if (leaf2(alt2)) { found = true; break; }
         }
-        if (everyAltIsLeaf)
+        if (!found) { everyAltIsLeaf = false; break; }
+      }
+      if (everyAltIsLeaf) {
+        // Subset path is always implicit (it's a true subtype); the
+        // reorder-only path still requires explicit `CoerceExpr`.
+        bool isExplicitCoerce = false;
+        if (auto anchor = locator.getAnchor()) {
+          if (auto *expr = anchor.dyn_cast<Expr *>())
+            isExplicitCoerce = isa<CoerceExpr>(expr);
+        }
+        bool isStrictSubset =
+            na1->getAlternatives().size() <
+            layout.getNarrowedAlternatives().size();
+        if (isExplicitCoerce || isStrictSubset)
           return getTypeMatchSuccess();
       }
     }
