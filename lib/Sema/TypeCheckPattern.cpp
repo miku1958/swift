@@ -1440,7 +1440,10 @@ Pattern *TypeChecker::coercePatternToType(
     // `case let x as T` patterns. The pattern matcher takes the
     // `as`-cast path through TypeCheckPattern, not through the
     // ExprRewriter visit methods that slice 18 originally hooked.
-    {
+    if (type->getCanonicalType() != IP->getCastType()->getCanonicalType()) {
+      // Skip same-type patterns — the pre-existing "'as' test is
+      // always true" diagnostic already covers them with cleaner
+      // wording, mirroring the slice-18 same-type dedup in CSApply.
       Type peeledFrom = type;
       if (auto opt = peeledFrom->getOptionalObjectType())
         peeledFrom = opt;
