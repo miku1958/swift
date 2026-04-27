@@ -1025,6 +1025,16 @@ bool IRGenModule::isResilientConformance(const RootProtocolConformance *root,
                                          bool disableOptimizations) {
   if (auto normal = dyn_cast<NormalProtocolConformance>(root))
     return isResilientConformance(normal, disableOptimizations);
+  // Phase 3.F slice 2+3: a narrowed-Any-dispatch builtin conformance to
+  // a resilient protocol must use the resilient witness-table builder
+  // path — the fragile path's getProtocolInfo asserts when the protocol
+  // is resilient and we don't ask for the RequirementSignature kind.
+  if (auto builtin = dyn_cast<BuiltinProtocolConformance>(root)) {
+    if (builtin->getBuiltinConformanceKind() ==
+        BuiltinConformanceKind::NarrowedAnyDispatch) {
+      return isResilient(root->getProtocol(), ResilienceExpansion::Maximal);
+    }
+  }
   // Self-conformances never require this.
   return false;
 }
