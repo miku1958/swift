@@ -6179,13 +6179,17 @@ TypeChecker::containsProtocol(Type T, ProtocolDecl *Proto,
         return std::make_pair(true, ProtocolConformanceRef::forInvalid());
     }
 
-    // Phase 2b.D: a narrowed `Any` "contains" a protocol when each of
-    // its declared alternatives conforms. This unblocks the do-catch
-    // implicit rethrow check for `throws(A | B) → any Error`: the
-    // residual carries the union, and the runtime can dispatch through
-    // the leaf's own conformance because the existential layout
-    // matches plain `Any`.
-    if (layout.isNarrowedAny()) {
+    // Phase 2b.D: a narrowed `Any` "contains" a self-conformance-
+    // supporting protocol when each declared alternative conforms.
+    // This unblocks the do-catch implicit rethrow check for
+    // `throws(A | B) → any Error`. We gate on
+    // `requiresSelfConformanceWitnessTable` for the same reason as
+    // `lookupExistentialConformance`: other protocols would need a
+    // real witness table that's not yet emittable, and accepting
+    // them at Sema-time produces a getConformancePath ICE later.
+    if (layout.isNarrowedAny() &&
+        (Proto->isMarkerProtocol() ||
+         Proto->requiresSelfConformanceWitnessTable())) {
       bool allConform = true;
       for (Type alt : layout.getNarrowedAlternatives()) {
         if (!lookupConformance(alt, Proto, /*allowMissing=*/false)) {

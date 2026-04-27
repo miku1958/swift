@@ -126,13 +126,30 @@ swift::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
 
   auto layout = type->getExistentialLayout();
 
-  // Phase 2b.D: narrowed `Any` synthesises conformance to a protocol
-  // when each declared alternative conforms. Witnesses are dispatched
-  // by opening the existential and forwarding to the leaf's own
-  // conformance — exactly what `swift_dynamicCast` already does for
-  // `Any → any Error`, since the IRGen routing makes our existential
-  // layout match `Any` exactly.
+  // Phase 2b.D / 3.A: narrowed `Any` synthesises conformance to a
+  // protocol when (a) the protocol has self-conformance witness-table
+  // support (today: `Error` only) and (b) each declared alternative
+  // conforms. Witnesses are dispatched by opening the existential and
+  // forwarding to the leaf's own conformance — exactly what
+  // `swift_dynamicCast` already does for `Any → any Error`, since
+  // IRGen routes the narrowed-Any layout to the `Any` singleton.
+  //
+  // Protocols *without* a self-conformance witness table (e.g.,
+  // `CustomStringConvertible`, `Hashable`, ...) need real witness
+  // emission for narrowed-Any-typed receivers. That's a separate
+  // IRGen synth that doesn't exist yet, so we deliberately do NOT
+  // synthesise here — letting `containsProtocol` produce a normal
+  // "doesn't conform" diagnostic at compile time, instead of
+  // accepting and ICE'ing later in `getConformancePath`.
   if (layout.isNarrowedAny()) {
+    // Synthesise only when (a) the protocol is a marker (no
+    // witness-table dispatch needed; e.g. Copyable, Escapable,
+    // Sendable) or (b) the protocol has self-conformance support
+    // (Error). Other protocols would need real witness emission and
+    // ICE in `getConformancePath` if accepted at Sema-time.
+    if (!protocol->isMarkerProtocol() &&
+        !protocol->requiresSelfConformanceWitnessTable())
+      return ProtocolConformanceRef::forInvalid();
     bool allConform = true;
     for (Type alt : layout.getNarrowedAlternatives()) {
       auto altConformance = lookupConformance(alt, protocol,
@@ -636,31 +653,37 @@ LookupConformanceRequest::evaluate(Evaluator &evaluator,
     }
 
     // Phase 2b.D: an opened narrowed-`Any` existential archetype
-    // additionally conforms to any protocol the *join* of its
-    // alternatives covers. Symptom without this: typed-throws
-    // do-catch produces an opened archetype that the runtime can
-    // dispatch through, but Sema reports "thrown expression type
-    // 'any A | B' does not conform to 'Error'" because the
-    // archetype's conformsTo list only carries layout-level marker
-    // protocols. We peek at the originating existential type to
-    // decide.
+    // additionally conforms to any self-conformance-supporting
+    // protocol the *join* of its alternatives covers (today: Error).
+    // Symptom without this: typed-throws do-catch produces an opened
+    // archetype that the runtime can dispatch through, but Sema
+    // reports "thrown expression type 'any A | B' does not conform
+    // to 'Error'" because the archetype's `conformsTo` list only
+    // carries layout-level marker protocols. We peek at the
+    // originating existential and gate on
+    // `requiresSelfConformanceWitnessTable` for the same reason as
+    // the `lookupExistentialConformance` path: protocols that need a
+    // real witness table can't be synthesised here yet.
     if (auto *exArch = dyn_cast<ExistentialArchetypeType>(archetype)) {
-      if (auto *env = exArch->getGenericEnvironment()) {
-        Type existTy = env->getOpenedExistentialType();
-        Type inner = existTy;
-        if (auto *ext = inner->getAs<ExistentialType>())
-          inner = ext->getConstraintType();
-        if (auto *na = inner->getAs<NarrowedAnyType>()) {
-          bool allConform = true;
-          for (Type alt : na->getAlternatives()) {
-            if (!lookupConformance(alt, protocol,
-                                    /*allowMissing=*/false)) {
-              allConform = false;
-              break;
+      if (protocol->isMarkerProtocol() ||
+          protocol->requiresSelfConformanceWitnessTable()) {
+        if (auto *env = exArch->getGenericEnvironment()) {
+          Type existTy = env->getOpenedExistentialType();
+          Type inner = existTy;
+          if (auto *ext = inner->getAs<ExistentialType>())
+            inner = ext->getConstraintType();
+          if (auto *na = inner->getAs<NarrowedAnyType>()) {
+            bool allConform = true;
+            for (Type alt : na->getAlternatives()) {
+              if (!lookupConformance(alt, protocol,
+                                      /*allowMissing=*/false)) {
+                allConform = false;
+                break;
+              }
             }
+            if (allConform)
+              return ProtocolConformanceRef::forAbstract(archetype, protocol);
           }
-          if (allConform)
-            return ProtocolConformanceRef::forAbstract(archetype, protocol);
         }
       }
     }
