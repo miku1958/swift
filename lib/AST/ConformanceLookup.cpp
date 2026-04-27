@@ -166,7 +166,8 @@ swift::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
     // real witness emission that Phase 3 doesn't yet provide. Letting
     // them fall through to invalid keeps the user out of
     // `getConformancePath` ICEs while clearly diagnosing "doesn't
-    // conform" at compile time.
+    // conform" at compile time. The user-level workaround is
+    // `as! any P` (see proposal § Synthesis maturity).
     return ProtocolConformanceRef::forInvalid();
   }
 
