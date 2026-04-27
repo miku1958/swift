@@ -1434,6 +1434,42 @@ Pattern *TypeChecker::coercePatternToType(
         type->hasError() ? CheckedCastContextKind::None
                          : CheckedCastContextKind::IsPattern,
         dc);
+
+    // Phase 3.F slice 18 follow-up: same warning as CSApply's
+    // warnIfNarrowedAnyCastIsProvablyEmpty, but for `case _ as T` /
+    // `case let x as T` patterns. The pattern matcher takes the
+    // `as`-cast path through TypeCheckPattern, not through the
+    // ExprRewriter visit methods that slice 18 originally hooked.
+    {
+      Type peeledFrom = type;
+      if (auto opt = peeledFrom->getOptionalObjectType())
+        peeledFrom = opt;
+      if (auto *ext = peeledFrom->getAs<ExistentialType>())
+        peeledFrom = ext->getConstraintType();
+      if (auto *na = peeledFrom->getAs<NarrowedAnyType>()) {
+        Type peeledTo = IP->getCastType();
+        if (auto opt = peeledTo->getOptionalObjectType())
+          peeledTo = opt;
+        if (!peeledTo->isExistentialType() && !peeledTo->hasArchetype() &&
+            !peeledTo->is<NarrowedAnyType>()) {
+          auto peeledToCanon = peeledTo->getCanonicalType();
+          bool isLeaf = false;
+          for (auto leaf : na->getAlternatives()) {
+            if (leaf->getCanonicalType() == peeledToCanon) {
+              isLeaf = true;
+              break;
+            }
+          }
+          if (!isLeaf) {
+            // diagSelect = 0 ("case _ as T" behaves like `as?` —
+            // arm matches none of the values when T isn't a leaf).
+            diags.diagnose(IP->getLoc(), diag::narrowed_any_cast_nonleaf,
+                           type, IP->getCastType(), 0);
+          }
+        }
+      }
+    }
+
     switch (castKind) {
     case CheckedCastKind::Unresolved:
       if (type->hasError()) {
