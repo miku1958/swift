@@ -1508,6 +1508,11 @@ WARNING(is_expr_same_type,none,
         "'!= nil'?", (Type, Type))
 WARNING(downcast_to_unrelated,none,
         "cast from %0 to unrelated type %1 always fails", (Type, Type))
+WARNING(narrowed_any_cast_nonleaf,none,
+        "%select{cast|cast|'is' check}2 from %0 to %1 always "
+        "%select{returns nil|fails|evaluates to false}2 because %1 is "
+        "not in the closed leaf set of %0",
+        (Type, Type, unsigned))
 NOTE(downcast_to_unrelated_fixit,none,
      "did you mean to call %0 with '()'?", (Identifier))
 ERROR(optional_chain_noop,none,

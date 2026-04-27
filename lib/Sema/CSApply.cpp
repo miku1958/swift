@@ -4147,6 +4147,45 @@ namespace {
       llvm_unreachable("Already type-checked");
     }
 
+    /// Phase 3.F slice 18: warn when a checked cast (`as?`, `as!`, or
+    /// `is`) goes from a narrowed-Any source whose closed leaf set
+    /// statically excludes the target type. The runtime would always
+    /// return nil / always trap / always be false respectively, but
+    /// pre-slice-18 the cast type-checked silently.
+    void warnIfNarrowedAnyCastIsProvablyEmpty(Expr *expr, Type fromType,
+                                              Type toType,
+                                              unsigned diagSelect) {
+      if (SuppressDiagnostics)
+        return;
+
+      Type peeledFrom = fromType;
+      if (auto opt = peeledFrom->getOptionalObjectType())
+        peeledFrom = opt;
+      if (auto *ext = peeledFrom->getAs<ExistentialType>())
+        peeledFrom = ext->getConstraintType();
+      auto *na = peeledFrom->getAs<NarrowedAnyType>();
+      if (!na)
+        return;
+
+      Type peeledTo = toType;
+      if (auto opt = peeledTo->getOptionalObjectType())
+        peeledTo = opt;
+      // Don't fire if the target is itself an existential / archetype
+      // / narrowed-Any — the runtime will need to inspect the dynamic
+      // type and the static check is not informative.
+      if (peeledTo->isExistentialType() || peeledTo->hasArchetype() ||
+          peeledTo->is<NarrowedAnyType>())
+        return;
+
+      auto peeledToCanon = peeledTo->getCanonicalType();
+      for (auto leaf : na->getAlternatives()) {
+        if (leaf->getCanonicalType() == peeledToCanon)
+          return;
+      }
+      ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_cast_nonleaf,
+                         fromType, toType, diagSelect);
+    }
+
     Expr *visitIsExpr(IsExpr *expr) {
       // Turn the subexpression into an rvalue.
       auto sub = cs.coerceToRValue(expr->getSubExpr());
@@ -4163,11 +4202,14 @@ namespace {
       auto castKind = TypeChecker::typeCheckCheckedCast(
           fromType, toType, CheckedCastContextKind::IsExpr, dc);
 
+      // Phase 3.F slice 18: 2 = "is always false" diagSelect.
+      warnIfNarrowedAnyCastIsProvablyEmpty(expr, fromType, toType, 2);
+
       switch (castKind) {
       case CheckedCastKind::Unresolved:
         expr->setCastKind(CheckedCastKind::ValueCast);
         break;
-          
+
       case CheckedCastKind::Coercion:
       case CheckedCastKind::BridgingCoercion:
       case CheckedCastKind::ValueCast:
@@ -4603,6 +4645,10 @@ namespace {
 
       const auto castKind = TypeChecker::typeCheckCheckedCast(
           fromType, toType, CheckedCastContextKind::ForcedCast, dc);
+
+      // Phase 3.F slice 18: 1 = "always fails (traps)" diagSelect.
+      warnIfNarrowedAnyCastIsProvablyEmpty(expr, fromType, toType, 1);
+
       switch (castKind) {
         /// Invalid cast.
       case CheckedCastKind::Unresolved:
@@ -4680,6 +4726,10 @@ namespace {
 
       auto castKind = TypeChecker::typeCheckCheckedCast(
           fromType, toType, CheckedCastContextKind::ConditionalCast, dc);
+
+      // Phase 3.F slice 18: 0 = "always returns nil" diagSelect.
+      warnIfNarrowedAnyCastIsProvablyEmpty(expr, fromType, toType, 0);
+
       switch (castKind) {
       // Invalid cast.
       case CheckedCastKind::Unresolved:
