@@ -2038,6 +2038,26 @@ void WitnessTableBuilderBase::defineAssociatedTypeWitnessTableAccessFunction(
 
 void ResilientWitnessTableBuilder::collectResilientWitnesses(
                       SmallVectorImpl<llvm::Constant *> &resilientWitnesses) {
+  // Phase 3.F slice 2+3 partial: a narrowed-Any-dispatch builtin
+  // conformance has no Normal-style fields (no type witnesses, no
+  // associated conformances, no inherited conformances), and the
+  // SILWT today has zero entries (real per-requirement thunk synth
+  // pending — see todo §六/3.F). The loop body below would only
+  // touch the Normal cast inside type-witness / associated-conf /
+  // base-protocol branches; for an empty narrowed-Any-dispatch table
+  // we can safely skip it.
+  if (auto *builtin = dyn_cast<BuiltinProtocolConformance>(&Conformance)) {
+    assert(builtin->getBuiltinConformanceKind() ==
+               BuiltinConformanceKind::NarrowedAnyDispatch &&
+           "only NarrowedAnyDispatch builtin conformance reaches the "
+           "resilient witness-table builder");
+    assert(SILWT->getEntries().empty() &&
+           "thunk synthesis not implemented yet — narrowed-Any "
+           "dispatch witness tables must have zero entries until "
+           "slice 2+3 lands real per-requirement synth");
+    return;
+  }
+
   assert(isa<NormalProtocolConformance>(Conformance) &&
          "resilient conformance should always be normal");
   auto &conformance = cast<NormalProtocolConformance>(Conformance);
