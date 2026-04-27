@@ -149,6 +149,8 @@ swift::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
     if (protocol->isSpecificProtocol(KnownProtocolKind::Equatable) ||
         protocol->isSpecificProtocol(KnownProtocolKind::Hashable) ||
         protocol->isSpecificProtocol(KnownProtocolKind::Comparable) ||
+        protocol->isSpecificProtocol(KnownProtocolKind::Encodable) ||
+        protocol->isSpecificProtocol(KnownProtocolKind::Decodable) ||
         isCustomStringConvertible()) {
       Type peeled = getConstraintType();
       if (auto *ext = peeled->getAs<ExistentialType>())

@@ -892,6 +892,150 @@ static bool tryEmitNarrowedAnyEquatableEqDispatch(
   return true;
 }
 
+/// Phase 3.F slice 13: synthesize per-leaf dispatch for
+/// `Encodable.encode(to:)` on a narrowed-Any type.
+/// Signature: `(@in_guaranteed any Encoder, @in_guaranteed Self) -> @error any Error`.
+///
+/// Body: for each leaf, try cast self -> leaf; on success
+/// `try_apply` leaf's `encode(to:)`; on apply-success: cleanup +
+/// return; on apply-error: cleanup + propagate the error via
+/// `throw`. All-fail trap-stub is unreachable (Sema gates).
+static bool tryEmitNarrowedAnyEncodableDispatch(
+    SILGenModule &SGM, SILFunction *thunk, SILBasicBlock *entry,
+    BuiltinProtocolConformance *conformance, SILDeclRef reqRef) {
+  ASTContext &ctx = SGM.getASTContext();
+  auto *encodable = ctx.getProtocol(KnownProtocolKind::Encodable);
+  if (conformance->getProtocol() != encodable)
+    return false;
+
+  auto *funcReq = dyn_cast_or_null<AbstractFunctionDecl>(reqRef.getDecl());
+  if (!funcReq || funcReq->getBaseIdentifier().str() != "encode")
+    return false;
+
+  Type peeled = conformance->getType();
+  if (auto *ext = peeled->getAs<ExistentialType>())
+    peeled = ext->getConstraintType();
+  auto *narrowedAny = peeled->getAs<NarrowedAnyType>();
+  if (!narrowedAny)
+    return false;
+  auto leaves = narrowedAny->getAlternatives();
+  if (leaves.empty())
+    return false;
+
+  auto loc = RegularLocation::getModuleLocation();
+
+  auto fnArgs = entry->getArguments();
+  // Encodable.encode(to:): (@in_guaranteed any Encoder, @in_guaranteed Self) -> @error
+  // 2 args (no implicit metatype for instance method).
+  if (fnArgs.size() != 2)
+    return false;
+  SILValue encoderArg = fnArgs[0];
+  SILValue selfAddr = fnArgs[1];
+
+  auto sig = thunk->getLoweredFunctionType()->getInvocationGenericSignature();
+  auto srcArchetype = thunk->getGenericEnvironment()
+      ->mapTypeIntoEnvironment(sig.getGenericParams()[0])
+      ->getCanonicalType();
+
+  // Exit-success block (no return value, just `return ()`).
+  auto *exitBB = thunk->createBasicBlock();
+  {
+    SILBuilder B(exitBB);
+    auto voidVal = B.createTuple(loc, {});
+    B.createReturn(loc, voidVal);
+  }
+
+  // Common throw block: takes the error value, throws.
+  auto errorTy = thunk->getLoweredFunctionType()
+      ->getErrorResult().getSILStorageType(thunk->getModule(),
+          thunk->getLoweredFunctionType(),
+          thunk->getTypeExpansionContext());
+  auto *throwBB = thunk->createBasicBlock();
+  auto *errorPhi =
+      throwBB->createPhiArgument(errorTy, OwnershipKind::Owned);
+  {
+    SILBuilder B(throwBB);
+    B.createThrow(loc, errorPhi);
+  }
+
+  auto *trapBB = thunk->createBasicBlock();
+  {
+    SILBuilder B(trapBB);
+    B.createUnreachable(loc);
+  }
+
+  auto reqInfo = SGM.Types.getConstantInfo(
+      TypeExpansionContext::minimal(), reqRef);
+  auto reqSILTy = SILType::getPrimitiveObjectType(reqInfo.SILFnType);
+
+  SILBasicBlock *currentBB = entry;
+  for (size_t i = 0; i < leaves.size(); i++) {
+    auto leafTy = leaves[i]->getCanonicalType();
+    auto silLeafAddrTy = SILType::getPrimitiveAddressType(leafTy);
+
+    SILBuilder B(currentBB);
+    auto *leafSlot = B.createAllocStack(loc, silLeafAddrTy);
+
+    auto *okBB = thunk->createBasicBlock();
+    auto *failBB = thunk->createBasicBlock();
+    B.createCheckedCastAddrBranch(loc, CheckedCastInstOptions(),
+        CastConsumptionKind::CopyOnSuccess,
+        selfAddr, srcArchetype,
+        leafSlot, leafTy,
+        okBB, failBB);
+
+    SILBuilder okB(okBB);
+    auto leafConf = swift::lookupConformance(leafTy, encodable);
+    assert(leafConf && "leaf was checked to conform at lookup time");
+    auto witness = okB.createWitnessMethod(loc, leafTy, leafConf,
+                                           reqRef, reqSILTy);
+    auto subs = SubstitutionMap::getProtocolSubstitutions(
+        encodable, leafTy, leafConf);
+
+    // try_apply needs normal_block + error_block.
+    auto *normalBB = thunk->createBasicBlock();
+    auto *errBB = thunk->createBasicBlock();
+    // Compute the substituted result type for normal_block's phi.
+    auto witnessFnTy = reqInfo.SILFnType->substGenericArgs(
+        SGM.M, subs, thunk->getTypeExpansionContext());
+    SILFunctionConventions wConv(witnessFnTy, SGM.M);
+    auto normalResultTy = wConv.getSILResultType(
+        thunk->getTypeExpansionContext());
+    normalBB->createPhiArgument(normalResultTy,
+                                 OwnershipKind::None);
+    errBB->createPhiArgument(errorTy, OwnershipKind::Owned);
+
+    okB.createTryApply(loc, witness, subs,
+                       {encoderArg, leafSlot},
+                       normalBB, errBB);
+
+    // normal_block: cleanup, br exit_success.
+    SILBuilder normalB(normalBB);
+    normalB.createDestroyAddr(loc, leafSlot);
+    normalB.createDeallocStack(loc, leafSlot);
+    normalB.createBranch(loc, exitBB);
+
+    // error_block: cleanup, forward error to throw_block.
+    SILBuilder errB(errBB);
+    auto errVal = errBB->getArgument(0);
+    errB.createDestroyAddr(loc, leafSlot);
+    errB.createDeallocStack(loc, leafSlot);
+    errB.createBranch(loc, throwBB, {errVal});
+
+    SILBuilder failB(failBB);
+    failB.createDeallocStack(loc, leafSlot);
+    if (i + 1 < leaves.size()) {
+      auto *nextBB = thunk->createBasicBlock();
+      failB.createBranch(loc, nextBB);
+      currentBB = nextBB;
+    } else {
+      failB.createBranch(loc, trapBB);
+    }
+  }
+
+  return true;
+}
+
 /// Phase 3.F slice 12: synthesize per-leaf dispatch for
 /// `CustomStringConvertible.description` getter on narrowed-Any.
 /// Signature: `(@in_guaranteed Self) -> @owned String` (instance
@@ -1606,7 +1750,9 @@ SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
           !tryEmitNarrowedAnyComparableLessThanDispatch(*this, thunk, entry,
                                                         conformance, reqRef) &&
           !tryEmitNarrowedAnyDescriptionGetterDispatch(*this, thunk, entry,
-                                                       conformance, reqRef)) {
+                                                       conformance, reqRef) &&
+          !tryEmitNarrowedAnyEncodableDispatch(*this, thunk, entry,
+                                               conformance, reqRef)) {
         SILBuilder builder(entry);
         builder.createUnreachable(RegularLocation::getModuleLocation());
       }
