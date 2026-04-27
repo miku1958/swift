@@ -892,6 +892,124 @@ static bool tryEmitNarrowedAnyEquatableEqDispatch(
   return true;
 }
 
+/// Phase 3.F slice 12: synthesize per-leaf dispatch for
+/// `CustomStringConvertible.description` getter on narrowed-Any.
+/// Signature: `(@in_guaranteed Self) -> @owned String` (instance
+/// property getter, no implicit metatype).
+///
+/// Body: for each leaf L, try cast self -> L; on success
+/// witness_method on leaf's getter, apply, return its String.
+/// All-fail fallback: trap (every leaf was checked to conform at
+/// lookup time, so this branch is unreachable).
+static bool tryEmitNarrowedAnyDescriptionGetterDispatch(
+    SILGenModule &SGM, SILFunction *thunk, SILBasicBlock *entry,
+    BuiltinProtocolConformance *conformance, SILDeclRef reqRef) {
+  auto *protocol = conformance->getProtocol();
+  if (protocol->getName().str() != "CustomStringConvertible")
+    return false;
+  auto *module = protocol->getModuleContext();
+  if (!module || !module->isStdlibModule())
+    return false;
+
+  // Detect the `description` getter accessor.
+  auto *accessor = dyn_cast_or_null<AccessorDecl>(reqRef.getDecl());
+  if (!accessor || accessor->getAccessorKind() != AccessorKind::Get)
+    return false;
+  auto *storage = accessor->getStorage();
+  if (storage->getBaseIdentifier().str() != "description")
+    return false;
+
+  Type peeled = conformance->getType();
+  if (auto *ext = peeled->getAs<ExistentialType>())
+    peeled = ext->getConstraintType();
+  auto *narrowedAny = peeled->getAs<NarrowedAnyType>();
+  if (!narrowedAny)
+    return false;
+  auto leaves = narrowedAny->getAlternatives();
+  if (leaves.empty())
+    return false;
+
+  auto loc = RegularLocation::getModuleLocation();
+
+  auto fnArgs = entry->getArguments();
+  if (fnArgs.size() != 1)
+    return false;
+  SILValue selfAddr = fnArgs[0];
+
+  auto sig = thunk->getLoweredFunctionType()->getInvocationGenericSignature();
+  auto srcArchetype = thunk->getGenericEnvironment()
+      ->mapTypeIntoEnvironment(sig.getGenericParams()[0])
+      ->getCanonicalType();
+
+  auto stringSILTy = thunk->getLoweredFunctionType()
+      ->getDirectFormalResultsType(thunk->getModule(),
+                                   thunk->getTypeExpansionContext());
+
+  // Exit block — phi takes String result (owned).
+  auto *exitBB = thunk->createBasicBlock();
+  auto *resultPhi =
+      exitBB->createPhiArgument(stringSILTy, OwnershipKind::Owned);
+  {
+    SILBuilder B(exitBB);
+    B.createReturn(loc, resultPhi);
+  }
+
+  // Trap-fallback (unreachable in practice). Don't try to construct
+  // an empty String here — leaving it as `unreachable` keeps the
+  // helper minimal and correct: Sema gates conformance on every
+  // leaf conforming, so one of the casts always succeeds.
+  auto *trapBB = thunk->createBasicBlock();
+  {
+    SILBuilder B(trapBB);
+    B.createUnreachable(loc);
+  }
+
+  auto reqInfo = SGM.Types.getConstantInfo(
+      TypeExpansionContext::minimal(), reqRef);
+  auto reqSILTy = SILType::getPrimitiveObjectType(reqInfo.SILFnType);
+
+  SILBasicBlock *currentBB = entry;
+  for (size_t i = 0; i < leaves.size(); i++) {
+    auto leafTy = leaves[i]->getCanonicalType();
+    auto silLeafAddrTy = SILType::getPrimitiveAddressType(leafTy);
+
+    SILBuilder B(currentBB);
+    auto *leafSlot = B.createAllocStack(loc, silLeafAddrTy);
+
+    auto *okBB = thunk->createBasicBlock();
+    auto *failBB = thunk->createBasicBlock();
+    B.createCheckedCastAddrBranch(loc, CheckedCastInstOptions(),
+        CastConsumptionKind::CopyOnSuccess,
+        selfAddr, srcArchetype,
+        leafSlot, leafTy,
+        okBB, failBB);
+
+    SILBuilder okB(okBB);
+    auto leafConf = swift::lookupConformance(leafTy, protocol);
+    assert(leafConf && "leaf was checked to conform at lookup time");
+    auto witness = okB.createWitnessMethod(loc, leafTy, leafConf,
+                                           reqRef, reqSILTy);
+    auto subs = SubstitutionMap::getProtocolSubstitutions(
+        protocol, leafTy, leafConf);
+    auto *strResult = okB.createApply(loc, witness, subs, {leafSlot});
+    okB.createDestroyAddr(loc, leafSlot);
+    okB.createDeallocStack(loc, leafSlot);
+    okB.createBranch(loc, exitBB, {strResult});
+
+    SILBuilder failB(failBB);
+    failB.createDeallocStack(loc, leafSlot);
+    if (i + 1 < leaves.size()) {
+      auto *nextBB = thunk->createBasicBlock();
+      failB.createBranch(loc, nextBB);
+      currentBB = nextBB;
+    } else {
+      failB.createBranch(loc, trapBB);
+    }
+  }
+
+  return true;
+}
+
 /// Phase 3.F slice 11: synthesize per-leaf dispatch for
 /// `Comparable.<` on a narrowed-Any type. Same shape as
 /// Equatable.== (static op, 3 args, returns Bool):
@@ -1408,12 +1526,26 @@ SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
     useConformance(nullptr, ProtocolConformanceRef(baseConf));
   }
 
+  // Collect SILDeclRefs for every concrete requirement that needs
+  // a witness-table slot. AbstractFunctionDecl maps directly;
+  // AbstractStorageDecl (var/subscript) expands to its accessors.
+  // This scaffolding is what future protocol extensions
+  // (CustomStringConvertible.description getter, etc.) will need.
+  SmallVector<SILDeclRef, 4> reqRefs;
   for (auto *req : protocol->getProtocolRequirements()) {
-    auto *funcReq = dyn_cast<AbstractFunctionDecl>(req);
-    if (!funcReq)
+    if (auto *funcReq = dyn_cast<AbstractFunctionDecl>(req)) {
+      reqRefs.push_back(SILDeclRef(funcReq));
       continue;
+    }
+    if (auto *storage = dyn_cast<AbstractStorageDecl>(req)) {
+      if (auto *getter = storage->getOpaqueAccessor(AccessorKind::Get))
+        reqRefs.push_back(SILDeclRef(getter, SILDeclRef::Kind::Func));
+      if (auto *setter = storage->getOpaqueAccessor(AccessorKind::Set))
+        reqRefs.push_back(SILDeclRef(setter, SILDeclRef::Kind::Func));
+    }
+  }
 
-    SILDeclRef reqRef(funcReq);
+  for (auto reqRef : reqRefs) {
     auto reqInfo = Types.getConstantInfo(
         TypeExpansionContext::minimal(), reqRef);
     auto reqSILFnType = reqInfo.SILFnType;
@@ -1472,7 +1604,9 @@ SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
           !tryEmitNarrowedAnyHashableRawHashValueDispatch(*this, thunk, entry,
                                                           conformance, reqRef) &&
           !tryEmitNarrowedAnyComparableLessThanDispatch(*this, thunk, entry,
-                                                        conformance, reqRef)) {
+                                                        conformance, reqRef) &&
+          !tryEmitNarrowedAnyDescriptionGetterDispatch(*this, thunk, entry,
+                                                       conformance, reqRef)) {
         SILBuilder builder(entry);
         builder.createUnreachable(RegularLocation::getModuleLocation());
       }

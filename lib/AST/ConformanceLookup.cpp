@@ -136,9 +136,20 @@ swift::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
     // also need element-type metadata, which is now correct. Try
     // wiring Hashable again with the slice-7 IRGen accessor +
     // BaseProtocolWitness path.
+    // CustomStringConvertible isn't a `KnownProtocolKind`, so we
+    // identify it by stdlib name. The runtime form is the same as
+    // any other property-only protocol.
+    auto isCustomStringConvertible = [&]() {
+      if (protocol->getName().str() != "CustomStringConvertible")
+        return false;
+      auto *module = protocol->getModuleContext();
+      return module && module->isStdlibModule();
+    };
+
     if (protocol->isSpecificProtocol(KnownProtocolKind::Equatable) ||
         protocol->isSpecificProtocol(KnownProtocolKind::Hashable) ||
-        protocol->isSpecificProtocol(KnownProtocolKind::Comparable)) {
+        protocol->isSpecificProtocol(KnownProtocolKind::Comparable) ||
+        isCustomStringConvertible()) {
       Type peeled = getConstraintType();
       if (auto *ext = peeled->getAs<ExistentialType>())
         peeled = ext->getConstraintType();
