@@ -1777,7 +1777,26 @@ NodePointer NodePrinter::print(NodePointer Node, unsigned depth,
     return nullptr;
   }
   case Node::Kind::NarrowedAnyType: {
-    printChildren(Node, depth, " | ");
+    // A nested NarrowedAnyType child must be parenthesized so the
+    // structural grouping survives in the printed name; otherwise
+    // `(Int | String) | Bool` and `Int | String | Bool` look identical
+    // and the spelling-as-identity invariant is invisible to readers.
+    Node::iterator begin = Node->begin(), end = Node->end();
+    for (; begin != end;) {
+      auto child = *begin;
+      bool nested = child && child->getKind() == Node::Kind::Type &&
+                    child->getNumChildren() == 1 &&
+                    child->getFirstChild()->getKind() ==
+                        Node::Kind::NarrowedAnyType;
+      if (nested)
+        Printer << "(";
+      print(child, depth + 1);
+      if (nested)
+        Printer << ")";
+      ++begin;
+      if (begin != end)
+        Printer << " | ";
+    }
     return nullptr;
   }
   case Node::Kind::SILPackDirect:
