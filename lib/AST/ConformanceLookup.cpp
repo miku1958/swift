@@ -121,6 +121,37 @@ swift::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
       }
     }
 
+    // Phase 3.F slice 5 wire-up: narrowed-Any forwards Equatable
+    // through builtin NarrowedAnyDispatch even though Equatable
+    // does not self-conform. SILGen synthesizes per-(narrowed-Any,
+    // Equatable) trap-stub witness tables (slice 2+3, real per-leaf
+    // dispatch pending). Limited to Equatable here so other
+    // non-self-conf protocols (BitwiseCopyable, ...) keep their
+    // existing forInvalid behavior — broadening would require each
+    // protocol's own synth + leaf-conformance check.
+    if (protocol->isSpecificProtocol(KnownProtocolKind::Equatable)) {
+      Type peeled = getConstraintType();
+      if (auto *ext = peeled->getAs<ExistentialType>())
+        peeled = ext->getConstraintType();
+      if (peeled->is<NarrowedAnyType>()) {
+        auto layout = type->getExistentialLayout();
+        bool allConform = true;
+        for (Type alt : layout.getNarrowedAlternatives()) {
+          auto altConformance = lookupConformance(alt, protocol,
+                                                  /*allowMissing=*/false);
+          if (!altConformance) {
+            allConform = false;
+            break;
+          }
+        }
+        if (allConform)
+          return ProtocolConformanceRef(
+              ctx.getBuiltinConformance(
+                  type, protocol,
+                  BuiltinConformanceKind::NarrowedAnyDispatch));
+      }
+    }
+
     return ProtocolConformanceRef::forInvalid();
   }
 

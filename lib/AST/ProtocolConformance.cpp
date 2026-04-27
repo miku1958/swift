@@ -379,6 +379,15 @@ bool RootProtocolConformance::isSynthesized() const {
   if (auto normal = dyn_cast<NormalProtocolConformance>(this))
     return normal->isSynthesizedNonUnique() || normal->isConformanceOfProtocol();
 
+  // Narrowed-Any dispatch builtin conformances are synthesized
+  // per-(union-shape, protocol) and shared across modules — Shared
+  // linkage makes the PCD/WT symbols hidden, matching the runtime
+  // lookup model (caller side gets WT via swift_getWitnessTable
+  // rather than direct symbol reference at link time).
+  if (auto builtin = dyn_cast<BuiltinProtocolConformance>(this))
+    return builtin->getBuiltinConformanceKind() ==
+           BuiltinConformanceKind::NarrowedAnyDispatch;
+
   return false;
 }
 
