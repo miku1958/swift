@@ -1105,6 +1105,20 @@ static bool isDependentConformance(
               const RootProtocolConformance *rootConformance,
               bool isResilient,
               llvm::SmallPtrSet<const NormalProtocolConformance *, 4> &visited){
+  // narrowed-Any-dispatch builtin conformances are always dependent
+  // (resilient witnesses, runtime-instantiated WT). Reporting them
+  // as dependent makes IRGen emit a generic witness table in the
+  // PCD, which drives swift_getWitnessTable's instantiation path.
+  // Without it the PCD has neither a static pattern nor a generic
+  // table, so swift_getWitnessTable returns null and any caller that
+  // goes through a dispatch thunk (generic Equatable position,
+  // Hashable's base-protocol slot, ...) crashes when dereferencing
+  // the WT.
+  if (auto builtin = dyn_cast<BuiltinProtocolConformance>(rootConformance)) {
+    return builtin->getBuiltinConformanceKind() ==
+           BuiltinConformanceKind::NarrowedAnyDispatch;
+  }
+
   // Self-conformances are never dependent.
   auto conformance = dyn_cast<NormalProtocolConformance>(rootConformance);
   if (!conformance)
