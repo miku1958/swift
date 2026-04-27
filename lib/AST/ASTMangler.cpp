@@ -307,6 +307,23 @@ std::string ASTMangler::mangleWitnessTable(const ProtocolConformance *C) {
   } else if (isa<SelfProtocolConformance>(C)) {
     appendProtocolName(cast<SelfProtocolConformance>(C)->getProtocol());
     appendOperator("WS");
+  } else if (auto *bc = dyn_cast<BuiltinProtocolConformance>(C)) {
+    // Phase 3.F slice 4 — narrowed-Any dispatch witness table mangling.
+    // Layout: <conformingType><protocolName>WX
+    // The `WX` operator distinguishes the per-narrowed-Any synthesized
+    // witness table (whose entries forward through runtime metadata
+    // dispatch into leaf witnesses) from the regular `WP` /
+    // self-conformance `WS` shapes. Other BuiltinProtocolConformance
+    // kinds (Synthesized, Missing) don't currently produce witness
+    // tables, so they shouldn't reach mangleWitnessTable; assert if
+    // they do so the next round of work catches them precisely.
+    assert(bc->getBuiltinConformanceKind() ==
+               BuiltinConformanceKind::NarrowedAnyDispatch &&
+           "only narrowed-Any-dispatch builtin conformances are "
+           "mangled into witness tables today");
+    appendType(bc->getType()->getCanonicalType(), nullptr);
+    appendProtocolName(bc->getProtocol());
+    appendOperator("WX");
   } else {
     llvm_unreachable("mangling unknown conformance kind");
   }
