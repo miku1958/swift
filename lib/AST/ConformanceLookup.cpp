@@ -152,6 +152,8 @@ swift::lookupExistentialConformance(Type type, ProtocolDecl *protocol) {
         protocol->isSpecificProtocol(KnownProtocolKind::Encodable) ||
         protocol->isSpecificProtocol(KnownProtocolKind::Decodable) ||
         isCustomStringConvertible()) {
+      // Decodable wired alongside Encodable; SIL helper handles
+      // the per-leaf-try widen-back-to-narrowed-Any path.
       Type peeled = getConstraintType();
       if (auto *ext = peeled->getAs<ExistentialType>())
         peeled = ext->getConstraintType();

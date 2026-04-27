@@ -892,6 +892,156 @@ static bool tryEmitNarrowedAnyEquatableEqDispatch(
   return true;
 }
 
+/// Phase 3.F slice 14: synthesize per-leaf dispatch for
+/// `Decodable.init(from:)` on a narrowed-Any type. Untagged JSON.
+/// SIL signature:
+///   `(@in any Decoder, @thick Self.Type) -> (@out Self, @error any Error)`.
+/// Entry args: [@out Self, @in Decoder, @thick Self.Type].
+///
+/// For each leaf L: copy decoder, try_apply leaf's init, on
+/// success widen leaf to narrowed-Any via init_existential_addr
+/// (using collectExistentialConformances to build the right
+/// conformances list), on error try next leaf. Last failed
+/// leaf's error is rethrown.
+static bool tryEmitNarrowedAnyDecodableDispatch(
+    SILGenModule &SGM, SILFunction *thunk, SILBasicBlock *entry,
+    BuiltinProtocolConformance *conformance, SILDeclRef reqRef) {
+  ASTContext &ctx = SGM.getASTContext();
+  auto *decodable = ctx.getProtocol(KnownProtocolKind::Decodable);
+  if (conformance->getProtocol() != decodable)
+    return false;
+
+  auto *ctorReq = dyn_cast_or_null<ConstructorDecl>(reqRef.getDecl());
+  if (!ctorReq)
+    return false;
+
+  Type peeled = conformance->getType();
+  if (auto *ext = peeled->getAs<ExistentialType>())
+    peeled = ext->getConstraintType();
+  auto *narrowedAny = peeled->getAs<NarrowedAnyType>();
+  if (!narrowedAny)
+    return false;
+  auto leaves = narrowedAny->getAlternatives();
+  if (leaves.empty())
+    return false;
+
+  auto loc = RegularLocation::getModuleLocation();
+
+  auto fnArgs = entry->getArguments();
+  if (fnArgs.size() != 3)
+    return false;
+  SILValue outAddr = fnArgs[0];
+  SILValue decoderAddr = fnArgs[1];
+
+  // Build the existential SIL type for narrowed-Any. We use the
+  // canonical ExistentialType(NarrowedAnyType) form — that's what
+  // SILGen sees in the standard `let v: Int|String = leafValue`
+  // path (which lowers init_existential_addr correctly).
+  auto narrowedAnyCan = conformance->getType()->getCanonicalType();
+  auto narrowedAnySIL = SILType::getPrimitiveAddressType(narrowedAnyCan);
+
+  auto sig = thunk->getLoweredFunctionType()->getInvocationGenericSignature();
+  auto srcArchetype = thunk->getGenericEnvironment()
+      ->mapTypeIntoEnvironment(sig.getGenericParams()[0])
+      ->getCanonicalType();
+  (void)srcArchetype;
+
+  auto decoderSILTy = decoderAddr->getType();
+
+  auto *exitBB = thunk->createBasicBlock();
+  {
+    SILBuilder B(exitBB);
+    auto voidVal = B.createTuple(loc, {});
+    B.createReturn(loc, voidVal);
+  }
+
+  auto errorTy = thunk->getLoweredFunctionType()
+      ->getErrorResult().getSILStorageType(thunk->getModule(),
+          thunk->getLoweredFunctionType(),
+          thunk->getTypeExpansionContext());
+  auto *throwBB = thunk->createBasicBlock();
+  auto *errorPhi =
+      throwBB->createPhiArgument(errorTy, OwnershipKind::Owned);
+  {
+    SILBuilder B(throwBB);
+    B.createDestroyAddr(loc, decoderAddr);
+    B.createThrow(loc, errorPhi);
+  }
+
+  auto reqInfo = SGM.Types.getConstantInfo(
+      TypeExpansionContext::minimal(), reqRef);
+  auto reqSILTy = SILType::getPrimitiveObjectType(reqInfo.SILFnType);
+
+  SILBasicBlock *currentBB = entry;
+  for (size_t i = 0; i < leaves.size(); i++) {
+    auto leafTy = leaves[i]->getCanonicalType();
+    auto silLeafAddrTy = SILType::getPrimitiveAddressType(leafTy);
+
+    SILBuilder B(currentBB);
+    auto *leafSlot = B.createAllocStack(loc, silLeafAddrTy);
+    auto *decoderCopy = B.createAllocStack(loc, decoderSILTy);
+    B.createCopyAddr(loc, decoderAddr, decoderCopy,
+                     IsNotTake, IsInitialization);
+
+    auto metaTy = SILType::getPrimitiveObjectType(
+        CanMetatypeType::get(leafTy, MetatypeRepresentation::Thick));
+    auto *metaVal = B.createMetatype(loc, metaTy);
+
+    auto leafConf = swift::lookupConformance(leafTy, decodable);
+    assert(leafConf && "leaf was checked to conform at lookup time");
+    auto witness = B.createWitnessMethod(loc, leafTy, leafConf,
+                                         reqRef, reqSILTy);
+    auto subs = SubstitutionMap::getProtocolSubstitutions(
+        decodable, leafTy, leafConf);
+
+    auto *normalBB = thunk->createBasicBlock();
+    auto *errBB = thunk->createBasicBlock();
+    auto voidTy = SILType::getPrimitiveObjectType(
+        ctx.TheEmptyTupleType);
+    normalBB->createPhiArgument(voidTy, OwnershipKind::None);
+    errBB->createPhiArgument(errorTy, OwnershipKind::Owned);
+
+    B.createTryApply(loc, witness, subs,
+                     {leafSlot, decoderCopy, metaVal},
+                     normalBB, errBB);
+
+    // normal: cast outAddr to narrowed-Any existential SIL type,
+    // init_existential_addr it as $L (use the type's conformance
+    // lookup for the conformances list — should be empty for
+    // narrowed-Any since it has Any layout), copy leaf in.
+    SILBuilder normalB(normalBB);
+    auto *castedOut = normalB.createUncheckedAddrCast(
+        loc, outAddr, narrowedAnySIL);
+    auto conformancesArr = swift::collectExistentialConformances(
+        leafTy, narrowedAnyCan, /*allowMissing=*/false);
+    auto *innerAddr = normalB.createInitExistentialAddr(
+        loc, castedOut, leafTy, silLeafAddrTy, conformancesArr);
+    normalB.createCopyAddr(loc, leafSlot, innerAddr,
+                           IsTake, IsInitialization);
+    normalB.createDestroyAddr(loc, decoderAddr);
+    normalB.createDeallocStack(loc, decoderCopy);
+    normalB.createDeallocStack(loc, leafSlot);
+    normalB.createBranch(loc, exitBB);
+
+    auto *errVal = errBB->getArgument(0);
+    SILBuilder errB(errBB);
+    if (i + 1 < leaves.size()) {
+      errB.createDestroyValue(loc, errVal);
+      errB.createDeallocStack(loc, decoderCopy);
+      errB.createDeallocStack(loc, leafSlot);
+      auto *nextBB = thunk->createBasicBlock();
+      errB.createBranch(loc, nextBB);
+      currentBB = nextBB;
+    } else {
+      errB.createDeallocStack(loc, decoderCopy);
+      errB.createDeallocStack(loc, leafSlot);
+      errB.createBranch(loc, throwBB, {errVal});
+    }
+  }
+
+  return true;
+}
+
 /// Phase 3.F slice 13: synthesize per-leaf dispatch for
 /// `Encodable.encode(to:)` on a narrowed-Any type.
 /// Signature: `(@in_guaranteed any Encoder, @in_guaranteed Self) -> @error any Error`.
@@ -1752,6 +1902,8 @@ SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
           !tryEmitNarrowedAnyDescriptionGetterDispatch(*this, thunk, entry,
                                                        conformance, reqRef) &&
           !tryEmitNarrowedAnyEncodableDispatch(*this, thunk, entry,
+                                               conformance, reqRef) &&
+          !tryEmitNarrowedAnyDecodableDispatch(*this, thunk, entry,
                                                conformance, reqRef)) {
         SILBuilder builder(entry);
         builder.createUnreachable(RegularLocation::getModuleLocation());
