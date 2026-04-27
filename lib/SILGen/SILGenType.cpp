@@ -849,6 +849,8 @@ static bool tryEmitNarrowedAnyEquatableEqDispatch(
     SILBuilder bothB(bothOkBB);
     auto leafConf = swift::lookupConformance(leafTy, equatable);
     assert(leafConf && "leaf was checked to conform at lookup time");
+    // Slice 15: trigger lazy emission of inner builtin conformances (nested narrowed-Any).
+    SGM.useConformance(nullptr, leafConf);
 
     auto witness = bothB.createWitnessMethod(loc, leafTy, leafConf,
                                              reqRef, eqSILTy);
@@ -989,6 +991,8 @@ static bool tryEmitNarrowedAnyDecodableDispatch(
 
     auto leafConf = swift::lookupConformance(leafTy, decodable);
     assert(leafConf && "leaf was checked to conform at lookup time");
+    // Slice 15: trigger lazy emission of inner builtin conformances (nested narrowed-Any).
+    SGM.useConformance(nullptr, leafConf);
     auto witness = B.createWitnessMethod(loc, leafTy, leafConf,
                                          reqRef, reqSILTy);
     auto subs = SubstitutionMap::getProtocolSubstitutions(
@@ -1137,6 +1141,8 @@ static bool tryEmitNarrowedAnyEncodableDispatch(
     SILBuilder okB(okBB);
     auto leafConf = swift::lookupConformance(leafTy, encodable);
     assert(leafConf && "leaf was checked to conform at lookup time");
+    // Slice 15: trigger lazy emission of inner builtin conformances (nested narrowed-Any).
+    SGM.useConformance(nullptr, leafConf);
     auto witness = okB.createWitnessMethod(loc, leafTy, leafConf,
                                            reqRef, reqSILTy);
     auto subs = SubstitutionMap::getProtocolSubstitutions(
@@ -1281,6 +1287,8 @@ static bool tryEmitNarrowedAnyDescriptionGetterDispatch(
     SILBuilder okB(okBB);
     auto leafConf = swift::lookupConformance(leafTy, protocol);
     assert(leafConf && "leaf was checked to conform at lookup time");
+    // Slice 15: trigger lazy emission of inner builtin conformances (nested narrowed-Any).
+    SGM.useConformance(nullptr, leafConf);
     auto witness = okB.createWitnessMethod(loc, leafTy, leafConf,
                                            reqRef, reqSILTy);
     auto subs = SubstitutionMap::getProtocolSubstitutions(
@@ -1424,6 +1432,8 @@ static bool tryEmitNarrowedAnyComparableLessThanDispatch(
     SILBuilder bothB(bothOkBB);
     auto leafConf = swift::lookupConformance(leafTy, comparable);
     assert(leafConf && "leaf was checked to conform at lookup time");
+    // Slice 15: trigger lazy emission of inner builtin conformances (nested narrowed-Any).
+    SGM.useConformance(nullptr, leafConf);
     auto witness = bothB.createWitnessMethod(loc, leafTy, leafConf,
                                              reqRef, eqSILTy);
     auto subs = SubstitutionMap::getProtocolSubstitutions(
@@ -1583,6 +1593,8 @@ static bool tryEmitNarrowedAnyHashableRawHashValueDispatch(
     SILBuilder okB(okBB);
     auto leafConf = swift::lookupConformance(leafTy, hashable);
     assert(leafConf && "leaf was checked to conform at lookup time");
+    // Slice 15: trigger lazy emission of inner builtin conformances (nested narrowed-Any).
+    SGM.useConformance(nullptr, leafConf);
 
     auto witness = okB.createWitnessMethod(loc, leafTy, leafConf,
                                            reqRef, reqSILTy);
@@ -1701,6 +1713,8 @@ static bool tryEmitNarrowedAnyHashableHashIntoDispatch(
     SILBuilder okB(okBB);
     auto leafConf = swift::lookupConformance(leafTy, hashable);
     assert(leafConf && "leaf was checked to conform at lookup time");
+    // Slice 15: trigger lazy emission of inner builtin conformances (nested narrowed-Any).
+    SGM.useConformance(nullptr, leafConf);
 
     auto witness = okB.createWitnessMethod(loc, leafTy, leafConf,
                                            reqRef, reqSILTy);

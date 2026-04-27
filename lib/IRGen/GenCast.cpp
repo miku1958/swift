@@ -22,6 +22,7 @@
 #include "GenHeap.h"
 #include "GenMeta.h"
 #include "GenProto.h"
+#include "GenOpaque.h"
 #include "IRGenDebugInfo.h"
 #include "IRGenFunction.h"
 #include "IRGenModule.h"
@@ -32,6 +33,7 @@
 
 #include "swift/AST/ExistentialLayout.h"
 #include "swift/AST/IRGenOptions.h"
+#include "swift/AST/Types.h"
 #include "swift/Basic/Assertions.h"
 #include "swift/SIL/DynamicCasts.h"
 #include "swift/SIL/SILInstruction.h"
@@ -106,7 +108,52 @@ llvm::Value *irgen::emitCheckedCast(IRGenFunction &IGF,
       IGF.Builder.CreateCall(IGF.IGM.getDynamicCastFunctionPointer(), args);
   call->setDoesNotThrow();
 
-  return call;
+  llvm::Value *result = call;
+
+  // Phase 3.F slice 15: leaf-membership post-check for narrowed-Any
+  // cast targets. The standard `swift_dynamicCast` only checks
+  // layout compatibility (narrowed-Any reuses Any layout per Phase
+  // 2b.D), so a `Bool → (Int|String)` cast would succeed even though
+  // Bool is not in the closed leaf set. After the standard cast
+  // returns true, additionally read the dest's dynamic content
+  // metadata and verify it matches one of the declared leaves;
+  // if not, force the result to false.
+  //
+  // This applies whenever the target is a NarrowedAnyType (or
+  // ExistentialType wrapping one). For non-narrowed-Any targets
+  // we keep the standard behavior unchanged.
+  CanType peeledTarget = targetType;
+  if (auto *ext = dyn_cast<ExistentialType>(peeledTarget.getPointer()))
+    peeledTarget = ext->getConstraintType()->getCanonicalType();
+
+  if (auto *na = dyn_cast<NarrowedAnyType>(peeledTarget.getPointer())) {
+    auto leaves = na->getAlternatives();
+    // dest is opaque-typed at this point (bitcast at line 85);
+    // read the metadata from offset = fixed-buffer-size (24 bytes
+    // in 64-bit Any layout). Use a byte GEP to avoid round-tripping
+    // through the existential SIL type.
+    auto fbufSize = getFixedBufferSize(IGF.IGM);
+    auto *bytePtr = dest.getAddress();
+    auto *metaSlotI8 = IGF.Builder.CreateConstInBoundsGEP1_64(
+        IGF.IGM.Int8Ty, bytePtr, fbufSize.getValue());
+    auto *metaSlot = IGF.Builder.CreateBitCast(
+        metaSlotI8, IGF.IGM.TypeMetadataPtrTy->getPointerTo());
+    auto *dynMeta = IGF.Builder.CreateLoad(metaSlot,
+                                           IGF.IGM.TypeMetadataPtrTy,
+                                           IGF.IGM.getPointerAlignment());
+
+    llvm::Value *membership =
+        llvm::ConstantInt::getFalse(IGF.IGM.getLLVMContext());
+    for (auto leaf : leaves) {
+      auto leafCanTy = leaf->getCanonicalType();
+      auto *leafMeta = IGF.emitTypeMetadataRef(leafCanTy);
+      auto *eq = IGF.Builder.CreateICmpEQ(dynMeta, leafMeta);
+      membership = IGF.Builder.CreateOr(membership, eq);
+    }
+    result = IGF.Builder.CreateAnd(result, membership);
+  }
+
+  return result;
 }
 
 FailableCastResult irgen::emitClassIdenticalCast(IRGenFunction &IGF,
