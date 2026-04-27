@@ -1826,7 +1826,8 @@ bool Parser::canParseTypeSimpleOrComposition() {
   if (!canParseElement())
     return false;
 
-  while (Tok.isContextualPunctuator("&")) {
+  while (Tok.isContextualPunctuator("&") ||
+         Tok.isContextualPunctuator("|")) {
     consumeToken();
     // Note we include 'some', 'any', and 'each' here for better recovery.
     if (!canParseElement())
