@@ -730,6 +730,33 @@ SILGenModule::getWitnessTable(NormalProtocolConformance *conformance) {
   return table;
 }
 
+SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
+    BuiltinProtocolConformance *conformance) {
+  // Phase 3.F slice 2+3 stub: emit an empty SILWitnessTable so the
+  // mangled `WX` symbol gets defined. Real per-requirement thunk
+  // synthesis is pending (route-1 cascade pinned in todo §六/3.F).
+  // For now, the witness table has zero entries — enough for the
+  // linker to resolve the symbol but any actual witness_method
+  // lookup at runtime would access an out-of-bounds slot.
+  assert(conformance->getBuiltinConformanceKind() ==
+             BuiltinConformanceKind::NarrowedAnyDispatch &&
+         "unexpected builtin conformance kind");
+
+  if (auto *cached = emittedBuiltinWitnessTables.lookup(conformance))
+    return cached;
+
+  // Best-effort linkage: shared so multiple modules naming the same
+  // (A | B, P) pair coalesce. Not serialized — definitions are
+  // intentionally trivial today.
+  SmallVector<SILWitnessTable::Entry, 0> entries;
+  SmallVector<ProtocolConformanceRef, 0> conditional;
+  auto *table = SILWitnessTable::create(
+      M, SILLinkage::Shared, IsNotSerialized, conformance, entries,
+      conditional, /*specialized=*/false);
+  emittedBuiltinWitnessTables.insert({conformance, table});
+  return table;
+}
+
 SILFunction *SILGenModule::emitProtocolWitness(
     ProtocolConformanceRef origConformance, SILLinkage linkage,
     SerializedKind_t serializedKind, SILDeclRef requirement,

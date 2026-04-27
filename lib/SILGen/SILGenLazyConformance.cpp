@@ -83,6 +83,20 @@ void SILGenModule::useConformance(SILInstruction *inst,
     conformance = specialized->getGenericConformance();
   }
 
+  // Phase 3.F slice 2+3 stub: a BuiltinProtocolConformance of kind
+  // NarrowedAnyDispatch needs an emitted SILWitnessTable so the
+  // mangled `WX` symbol resolves at link time. Emit eagerly here
+  // (don't go through the pendingConformances queue, which is typed
+  // for NormalProtocolConformance only — widening it is the route-1
+  // cascade pinned in todo §六/3.F).
+  if (auto *builtin = dyn_cast<BuiltinProtocolConformance>(conformance)) {
+    if (builtin->getBuiltinConformanceKind() ==
+        BuiltinConformanceKind::NarrowedAnyDispatch) {
+      (void)getNarrowedAnyDispatchWitnessTable(builtin);
+    }
+    return;
+  }
+
   // Get the normal conformance. If we don't have one, this is a self
   // conformance, which we can ignore.
   auto normal = dyn_cast<NormalProtocolConformance>(conformance);

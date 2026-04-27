@@ -60,6 +60,10 @@ public:
   llvm::DenseMap<SILDeclRef, SILFunction*> emittedFunctions;
   /// Mapping from ProtocolConformances to emitted SILWitnessTables.
   llvm::DenseMap<NormalProtocolConformance*, SILWitnessTable*> emittedWitnessTables;
+  /// Phase 3.F slice 2+3 cache: emitted narrowed-Any-dispatch witness
+  /// tables, keyed by the BuiltinProtocolConformance instance.
+  llvm::DenseMap<BuiltinProtocolConformance *, SILWitnessTable *>
+      emittedBuiltinWitnessTables;
 
   /// Mapping from SILDeclRefs to where the given function will be inserted
   /// when it's emitted. Used for non-externally visible symbols.
@@ -390,6 +394,16 @@ public:
 
   /// Get or emit the witness table for a protocol conformance.
   SILWitnessTable *getWitnessTable(NormalProtocolConformance *conformance);
+
+  /// Phase 3.F slice 2+3 stub: emit a narrowed-Any-dispatch witness
+  /// table for a `BuiltinProtocolConformance` of kind
+  /// `NarrowedAnyDispatch`. Today this creates an empty
+  /// `SILWitnessTable` definition (no entries) — enough for the
+  /// linker to find the `WX` symbol but not enough for runtime
+  /// dispatch. Real per-requirement thunk synthesis is still
+  /// pending (the route-1 cascade pinned in todo §六/3.F).
+  SILWitnessTable *
+  getNarrowedAnyDispatchWitnessTable(BuiltinProtocolConformance *conformance);
 
   /// Emit a protocol witness entry point.
   SILFunction *
