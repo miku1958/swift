@@ -2147,6 +2147,36 @@ static void diagnoseOperatorAmbiguity(ConstraintSystem &cs,
                     operatorName.str());
         return;
       }
+
+      // Phase 3.F slice 20: when both sides are a narrowed-Any whose
+      // builtin protocol synth requires every leaf to conform, point
+      // the user at the specific leaf that is blocking the synthesis
+      // rather than leaving them with the bare "cannot be applied"
+      // wall.
+      Type peeled = lhsType;
+      if (auto *ext = peeled->getAs<ExistentialType>())
+        peeled = ext->getConstraintType();
+      if (auto *na = peeled->getAs<NarrowedAnyType>()) {
+        std::optional<KnownProtocolKind> proto;
+        auto opStr = operatorName.str();
+        if (opStr == "==" || opStr == "!=")
+          proto = KnownProtocolKind::Equatable;
+        else if (opStr == "<" || opStr == ">" || opStr == "<=" ||
+                 opStr == ">=")
+          proto = KnownProtocolKind::Comparable;
+        if (proto) {
+          if (auto *protoDecl = ctx.getProtocol(*proto)) {
+            for (auto leaf : na->getAlternatives()) {
+              if (!checkConformance(leaf, protoDecl)) {
+                DE.diagnose(anchor->getLoc(),
+                            diag::narrowed_any_leaf_missing_conformance,
+                            lhsType, leaf, protoDecl->getName());
+                break;
+              }
+            }
+          }
+        }
+      }
     } else if (operatorName == ctx.Id_MatchOperator) {
       DE.diagnose(anchor->getLoc(), diag::cannot_match_expr_pattern_with_value,
                   lhsType, rhsType);

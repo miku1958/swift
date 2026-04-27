@@ -2817,6 +2817,9 @@ NOTE(narrowed_any_extension_unsupported,none,
      "function with a `where T: A | B` constraint to add behaviour "
      "uniformly across leaves",
      ())
+NOTE(narrowed_any_leaf_missing_conformance,none,
+     "%0 cannot synthesise %2 because leaf %1 does not conform to %2",
+     (Type, Type, Identifier))
 WARNING(composition_in_extended_type,none,
         "extending a protocol composition is not supported; extending %0 "
         "instead", (Type))
