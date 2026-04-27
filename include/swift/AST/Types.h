@@ -8504,7 +8504,8 @@ inline bool CanType::isExistentialTypeImpl(CanType type) {
   return isa<ProtocolType>(type) ||
          isa<ProtocolCompositionType>(type) ||
          isa<ExistentialType>(type) ||
-         isa<ParameterizedProtocolType>(type);
+         isa<ParameterizedProtocolType>(type) ||
+         isa<NarrowedAnyType>(type);
 }
 
 inline bool CanType::isAnyExistentialTypeImpl(CanType type) {

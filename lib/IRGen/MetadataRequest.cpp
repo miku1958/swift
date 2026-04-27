@@ -2099,6 +2099,19 @@ namespace {
       if (type->isAny() || type->isAnyObject())
         return emitSingletonExistentialTypeMetadata(type);
 
+      // Narrowed `Any`'s run-time shape is exactly `Any` (the closed
+      // conformer set is a Sema-level construct, invisible at IR/runtime).
+      // Route to the `Any` singleton metadata so identity comparisons in
+      // the dynamic-cast runtime hit the fast path instead of producing
+      // a freshly-allocated existential metadata that confuses the
+      // pointer-equality checks in tryCastUnwrappingExistentialSource.
+      if (isa<NarrowedAnyType>(type->getConstraintType().getPointer())) {
+        auto anyExistential = CanExistentialType(
+            ExistentialType::get(IGF.IGM.Context.TheAnyType)
+                ->castTo<ExistentialType>());
+        return emitSingletonExistentialTypeMetadata(anyExistential);
+      }
+
       auto metadata = emitExistentialTypeMetadata(type);
       return setLocal(type, MetadataResponse::forComplete(metadata));
     }

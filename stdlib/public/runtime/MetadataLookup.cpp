@@ -2129,6 +2129,19 @@ public:
     return BuiltType();
   }
 
+  TypeLookupErrorOr<BuiltType>
+  createNarrowedAnyType(llvm::ArrayRef<BuiltType> alternatives) const {
+    // Phase 2b.D: at the runtime metadata layer, narrowed `Any` has the
+    // exact same shape as plain `Any` — its closed-conformer set is a
+    // Sema-level construct only, invisible to the cast machinery. Reuse
+    // the `Any` existential metadata so dynamic casts go through the
+    // same fast path (`tryCastUnwrappingExistentialSource` etc.).
+    (void)alternatives;
+    return BuiltType(swift_getExistentialTypeMetadata(
+        ProtocolClassConstraint::Any, /*superclass=*/nullptr,
+        /*numProtocols=*/0, /*protocols=*/nullptr));
+  }
+
   TypeLookupErrorOr<BuiltType> createDynamicSelfType(BuiltType selfType) const {
     // Free-standing mangled type strings should not contain DynamicSelfType.
     return BuiltType();

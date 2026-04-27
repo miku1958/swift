@@ -3022,16 +3022,8 @@ NeverNullType TypeResolver::resolveType(TypeRepr *repr,
     }
 
   case TypeReprKind::NarrowedAny: {
-    // Phase 2b.D groundwork is in place (ExistentialLayout::
-    // narrowedAlternatives, matchExistentialTypes leaf-membership,
-    // full demangle pipeline, TypeLowering wrap, IRGenDebugInfo
-    // typedef-to-Any). The remaining gate is *runtime support*: the
-    // resolution flip (`ExistentialType::get(narrowedType)`) was
-    // attempted on 2026-04-27 and reaches `swift_dynamicCastSlow`
-    // with metadata the runtime can't yet decode. Until that lands,
-    // we keep building the NarrowedAnyType (FoldingSet stays warm,
-    // mangle/demangle pipeline still gets exercised) and resolve
-    // user-visibly to plain `Any`.
+    // Phase 2b.D: resolve to ExistentialType(NarrowedAnyType) so the
+    // closed conformer set actually flows through Sema, IRGen, and DI.
     auto narrowed = cast<NarrowedAnyTypeRepr>(repr);
     auto &ctx = getASTContext();
     SmallVector<Type, 4> resolvedAlts;
@@ -3041,8 +3033,8 @@ NeverNullType TypeResolver::resolveType(TypeRepr *repr,
         return ErrorType::get(ctx);
       resolvedAlts.push_back(t);
     }
-    (void)NarrowedAnyType::get(ctx, resolvedAlts);
-    return ExistentialType::get(ctx.TheAnyType);
+    Type narrowedType = NarrowedAnyType::get(ctx, resolvedAlts);
+    return ExistentialType::get(narrowedType);
   }
 
   case TypeReprKind::Metatype:

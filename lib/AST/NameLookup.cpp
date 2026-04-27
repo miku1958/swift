@@ -2637,6 +2637,15 @@ void namelookup::extractDirectlyReferencedNominalTypes(
     return;
   }
 
+  if (auto narrowed = type->getAs<NarrowedAnyType>()) {
+    // The directly-referenced nominals of `A | B` are the union of the
+    // nominals referenced by each alternative — name lookup through
+    // narrowed `Any` reaches anything reachable through any leaf.
+    for (Type alt : narrowed->getAlternatives())
+      extractDirectlyReferencedNominalTypes(alt, decls);
+    return;
+  }
+
   if (type->is<TupleType>()) {
     decls.push_back(type->getASTContext().getBuiltinTupleDecl());
     return;
