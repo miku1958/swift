@@ -3457,19 +3457,23 @@ IRGenFunction::emitTypeMetadataRef(CanType type,
     return MetadataResponse::forComplete(getDynamicSelfMetadata());
   }
 
-  // Phase 2b.D / 3.F slice 6: a narrowed-Any type's run-time shape is
-  // exactly `Any` (the closed-conformer set is a Sema-only construct).
-  // Bypass the mangled-name accessor cache (which would require the
-  // runtime to decode `XN`) and emit the `Any` singleton metadata
-  // directly — this stays correct for system runtimes that lack
-  // `createNarrowedAnyType`. The decision matters whenever an apply
-  // substitutes τ → narrowed-Any (witness-method dispatch, generic
-  // polymorphism, etc.).
-  if (auto *exTy = type->getAs<ExistentialType>()) {
-    if (isa<NarrowedAnyType>(exTy->getConstraintType().getPointer())) {
-      return emitDirectTypeMetadataRef(*this, type, request);
-    }
-  }
+  // Phase 2b.D / 3.F slice 6+9: any type containing a narrowed-Any
+  // sub-type cannot go through the mangled-name accessor cache —
+  // the runtime would need to decode `XN` (fork-only). Route to
+  // `emitDirectTypeMetadataRef` which open-codes the metadata
+  // construction (visitExistentialType narrowed-Any -> Any singleton
+  // for the sub-type, getGenericMetadata for the wrapping generic).
+  // Without this, e.g. Array<Int|String> goes through
+  // `__swift_instantiateConcreteTypeFromMangledName($sSaySi_SSXNGMD)`
+  // -> system runtime's swift_getTypeByMangledName -> null element
+  // -> swift_getGenericMetadata returns null -> any subsequent
+  // method (Sequence.contains, Equatable.==, ...) crashes when
+  // dereferencing the metadata.
+  bool containsNarrowedAny = type.findIf([](Type t) -> bool {
+    return isa<NarrowedAnyType>(t.getPointer());
+  });
+  if (containsNarrowedAny)
+    return emitDirectTypeMetadataRef(*this, type, request);
 
   if (type->hasArchetype() ||
       !shouldTypeMetadataAccessUseAccessor(IGM, type) ||
