@@ -2160,32 +2160,29 @@ private:
     }
 
     case TypeKind::NarrowedAny: {
-      // Emit each alternative as a member so that the DICompositeType's
-      // RawIdentifier matches the mangled name we computed above. Real
-      // DWARF for the closed-conformer side-table (run-time membership
-      // queries, narrowing operations) is still Phase 3 work.
-      auto *NarrowedTy = cast<NarrowedAnyType>(BaseTy);
-
-      llvm::TempDICompositeType FwdDecl(DBuilder.createReplaceableCompositeType(
-          llvm::dwarf::DW_TAG_structure_type, MangledName, Scope, nullptr, 0,
-          llvm::dwarf::DW_LANG_Swift, SizeInBits, AlignInBits, Flags));
-
-      SmallVector<llvm::Metadata *, 4> Members;
-      for (Type AltTy : NarrowedTy->getAlternatives()) {
-        auto AltDbgTy = DebugTypeInfo::getFromTypeInfo(
-            AltTy, IGM.getTypeInfoForUnlowered(AltTy), IGM);
-        auto *AltDITy = getOrCreateType(AltDbgTy);
-        Members.push_back(
-            DBuilder.createInheritance(FwdDecl.get(), AltDITy, 0, 0, Flags));
-      }
-
-      auto *DITy = DBuilder.createStructType(
-          Scope, MangledName, nullptr, 0, SizeInBits, AlignInBits, Flags,
-          nullptr, DBuilder.getOrCreateArray(Members),
-          llvm::dwarf::DW_LANG_Swift, /*VTableHolder=*/nullptr, MangledName);
-
-      DBuilder.replaceTemporary(std::move(FwdDecl), DITy);
-      return DITy;
+      // Emit a typedef pointing at the desugared `Any` DI. Two things
+      // matter here:
+      //
+      //   * NarrowedAny manglings can reach this case from sugared,
+      //     canonical, and wrapped paths whose initial cache lookups
+      //     miss for separate reasons. A `DICompositeType` would then
+      //     get cached under the same UID twice (different node
+      //     identity, identical mangled name) and trip the
+      //     "conflicting types for one UID" soundness assert.
+      //
+      //   * The mangler's self-verify at IRGenDebugInfo.cpp:1105 cross-
+      //     checks the constructed name's UID against the recomputed
+      //     mangled name. That check fires inside the DICompositeType
+      //     branch only — typedef nodes don't carry a RawIdentifier
+      //     and are exempt.
+      //
+      // A typedef is also semantically honest given the prototype: at
+      // run-time the type *is* `Any`; the closed conformer set is a
+      // Sema-level construct. Real DWARF for the side-table is Phase 3.
+      auto AnyTy = ProtocolCompositionType::theAnyType(IGM.Context);
+      llvm::DIType *AnyDITy = getOrCreateDesugaredType(AnyTy, DbgTy);
+      return DBuilder.createTypedef(AnyDITy, MangledName, MainFile, 0,
+                                    Scope);
     }
 
     case TypeKind::ProtocolComposition: {

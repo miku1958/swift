@@ -3022,14 +3022,15 @@ NeverNullType TypeResolver::resolveType(TypeRepr *repr,
     }
 
   case TypeReprKind::NarrowedAny: {
-    // Phase 2b.D groundwork landed (ExistentialLayout::narrowedAlternatives,
-    // matchExistentialTypes leaf-membership rule, full Demangler /
-    // Remangler / NodePrinter / TypeDecoder coverage), but flipping
-    // resolution to `ExistentialType(NarrowedAnyType)` surfaces a
-    // further IRGen DI cascade (UID conflicts on duplicate-mangled
-    // narrowed types) that needs a focused follow-up. Until then we
-    // continue to construct the NarrowedAnyType (keeps the FoldingSet
-    // warm + exercises the demangle/remangle pipeline) and resolve
+    // Phase 2b.D groundwork is in place (ExistentialLayout::
+    // narrowedAlternatives, matchExistentialTypes leaf-membership,
+    // full demangle pipeline, TypeLowering wrap, IRGenDebugInfo
+    // typedef-to-Any). The remaining gate is *runtime support*: the
+    // resolution flip (`ExistentialType::get(narrowedType)`) was
+    // attempted on 2026-04-27 and reaches `swift_dynamicCastSlow`
+    // with metadata the runtime can't yet decode. Until that lands,
+    // we keep building the NarrowedAnyType (FoldingSet stays warm,
+    // mangle/demangle pipeline still gets exercised) and resolve
     // user-visibly to plain `Any`.
     auto narrowed = cast<NarrowedAnyTypeRepr>(repr);
     auto &ctx = getASTContext();
