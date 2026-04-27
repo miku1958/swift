@@ -4163,35 +4163,64 @@ namespace {
         peeledFrom = opt;
       if (auto *ext = peeledFrom->getAs<ExistentialType>())
         peeledFrom = ext->getConstraintType();
-      auto *na = peeledFrom->getAs<NarrowedAnyType>();
-      if (!na)
-        return;
 
       Type peeledTo = toType;
       if (auto opt = peeledTo->getOptionalObjectType())
         peeledTo = opt;
-      // Don't fire if the target is itself an existential / archetype
-      // / narrowed-Any — the runtime will need to inspect the dynamic
-      // type and the static check is not informative.
-      if (peeledTo->isExistentialType() || peeledTo->hasArchetype() ||
-          peeledTo->is<NarrowedAnyType>())
-        return;
+      auto *toExt = peeledTo->getAs<ExistentialType>();
+      if (toExt)
+        peeledTo = toExt->getConstraintType();
 
-      auto peeledToCanon = peeledTo->getCanonicalType();
-      for (auto leaf : na->getAlternatives()) {
-        if (leaf->getCanonicalType() == peeledToCanon)
+      // Direction A: src is narrowed-Any, target is concrete non-leaf.
+      if (auto *na = peeledFrom->getAs<NarrowedAnyType>()) {
+        // Don't fire if the target is itself an existential / archetype
+        // / narrowed-Any — the runtime will need to inspect the dynamic
+        // type and the static check is not informative.
+        if (peeledTo->isExistentialType() || peeledTo->hasArchetype() ||
+            peeledTo->is<NarrowedAnyType>())
           return;
+        auto peeledToCanon = peeledTo->getCanonicalType();
+        for (auto leaf : na->getAlternatives()) {
+          if (leaf->getCanonicalType() == peeledToCanon)
+            return;
+        }
+        ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_cast_nonleaf,
+                           fromType, toType, diagSelect);
+        llvm::SmallString<128> leafBuf;
+        llvm::raw_svector_ostream leafOS(leafBuf);
+        llvm::interleaveComma(na->getAlternatives(), leafOS,
+                              [&](Type leaf) { leaf->print(leafOS); });
+        ctx.Diags.diagnose(expr->getLoc(),
+                           diag::narrowed_any_cast_nonleaf_leaves,
+                           fromType, leafOS.str());
+        return;
       }
-      ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_cast_nonleaf,
-                         fromType, toType, diagSelect);
-      // Note: list the leaves so the user has a visible fix.
-      llvm::SmallString<128> leafBuf;
-      llvm::raw_svector_ostream leafOS(leafBuf);
-      llvm::interleaveComma(na->getAlternatives(), leafOS,
-                            [&](Type leaf) { leaf->print(leafOS); });
-      ctx.Diags.diagnose(expr->getLoc(),
-                         diag::narrowed_any_cast_nonleaf_leaves,
-                         fromType, leafOS.str());
+
+      // Direction B: target is narrowed-Any, src is concrete non-leaf.
+      // Slice 17 short-circuits these at IRGen, but Sema can flag them
+      // at compile time so users notice the leaf-set mismatch before
+      // running. Uses the `_to` variant of the diagnostic so the
+      // wording reads correctly ("Bool is not in the closed leaf set
+      // of V" rather than "V is not in the closed leaf set of Bool").
+      if (auto *na = peeledTo->getAs<NarrowedAnyType>()) {
+        if (peeledFrom->isExistentialType() || peeledFrom->hasArchetype() ||
+            peeledFrom->is<NarrowedAnyType>())
+          return;
+        auto peeledFromCanon = peeledFrom->getCanonicalType();
+        for (auto leaf : na->getAlternatives()) {
+          if (leaf->getCanonicalType() == peeledFromCanon)
+            return;
+        }
+        ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_cast_nonleaf_to,
+                           fromType, toType, diagSelect);
+        llvm::SmallString<128> leafBuf;
+        llvm::raw_svector_ostream leafOS(leafBuf);
+        llvm::interleaveComma(na->getAlternatives(), leafOS,
+                              [&](Type leaf) { leaf->print(leafOS); });
+        ctx.Diags.diagnose(expr->getLoc(),
+                           diag::narrowed_any_cast_nonleaf_leaves,
+                           toType, leafOS.str());
+      }
     }
 
     Expr *visitIsExpr(IsExpr *expr) {
