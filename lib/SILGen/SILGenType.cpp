@@ -782,11 +782,81 @@ SILWitnessTable *SILGenModule::getNarrowedAnyDispatchWitnessTable(
   if (auto *cached = emittedBuiltinWitnessTables.lookup(conformance))
     return cached;
 
+  // Phase 3.F slice 2+3 trap-stub: synthesize a `[shared] [thunk]`
+  // SIL function per protocol method requirement, body just emits
+  // `unreachable`. This converts the runtime SIGSEGV (from the
+  // earlier empty-WT state) into a clean trap when a witness method
+  // is invoked. Real per-leaf dispatch synth replaces the body in a
+  // follow-up.
+  SmallVector<SILWitnessTable::Entry, 4> entries;
+  SmallVector<ProtocolConformanceRef, 0> conditional;
+  SILGenFunctionBuilder funcBuilder(*this);
+
+  auto *protocol = conformance->getProtocol();
+
+  for (auto *req : protocol->getProtocolRequirements()) {
+    auto *funcReq = dyn_cast<AbstractFunctionDecl>(req);
+    if (!funcReq)
+      continue;
+
+    SILDeclRef reqRef(funcReq);
+    auto reqInfo = Types.getConstantInfo(
+        TypeExpansionContext::minimal(), reqRef);
+    auto reqSILFnType = reqInfo.SILFnType;
+
+    // Mangle a stable per-(conformance, requirement) name. Reusing
+    // ASTMangler keeps the symbol in a recognizable shape; "Tnaw"
+    // suffix marks "narrowed-any-dispatch witness, trap-stub" so the
+    // demangler / debugger can distinguish.
+    Mangle::ASTMangler mangler(getASTContext());
+    auto thunkName = mangler.mangleWitnessThunk(conformance,
+                                                reqRef.getDecl()) +
+                     "Tnaw";
+
+    auto *thunk = funcBuilder.getOrCreateSharedFunction(
+        RegularLocation::getModuleLocation(),
+        thunkName, reqSILFnType,
+        IsBare, IsNotTransparent, IsNotSerialized,
+        ProfileCounter(), IsThunk, IsNotDynamic, IsNotDistributed,
+        IsNotRuntimeAccessible);
+    if (thunk->empty()) {
+      // Trap-stub body: an entry block with all SILFunctionArguments
+      // matching the requirement's signature, then `unreachable`.
+      // Real per-leaf dispatch synth (the follow-up) replaces the
+      // unreachable with a body that opens the existential operands
+      // and dispatches to leaf witnesses.
+      //
+      // The SIL function type is polymorphic in the protocol's
+      // requirement signature (e.g. `<τ_0_0: Equatable>`); the
+      // verifier requires a matching generic environment on the
+      // function and entry-block args mapped through that env.
+      auto sig = reqSILFnType->getInvocationGenericSignature();
+      thunk->setGenericEnvironment(sig.getGenericEnvironment());
+      thunk->setBare(IsBare);
+      auto *entry = thunk->createBasicBlock();
+
+      SILFunctionConventions fnConv(reqSILFnType, M);
+      auto expansion = thunk->getTypeExpansionContext();
+      for (auto resultTy :
+           fnConv.getIndirectSILResultTypes(expansion))
+        entry->createFunctionArgument(thunk->mapTypeIntoEnvironment(resultTy));
+      if (fnConv.hasIndirectSILErrorResults())
+        entry->createFunctionArgument(thunk->mapTypeIntoEnvironment(
+            fnConv.getIndirectErrorResultType(expansion)));
+      for (auto paramTy :
+           fnConv.getParameterSILTypes(expansion))
+        entry->createFunctionArgument(thunk->mapTypeIntoEnvironment(paramTy));
+
+      SILBuilder builder(entry);
+      builder.createUnreachable(RegularLocation::getModuleLocation());
+    }
+
+    entries.push_back(SILWitnessTable::MethodWitness{reqRef, thunk});
+  }
+
   // Best-effort linkage: shared so multiple modules naming the same
   // (A | B, P) pair coalesce. Not serialized — definitions are
   // intentionally trivial today.
-  SmallVector<SILWitnessTable::Entry, 0> entries;
-  SmallVector<ProtocolConformanceRef, 0> conditional;
   auto *table = SILWitnessTable::create(
       M, SILLinkage::Shared, IsNotSerialized, conformance, entries,
       conditional, /*specialized=*/false);

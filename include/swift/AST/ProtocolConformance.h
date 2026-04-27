@@ -1352,6 +1352,14 @@ public:
   }
 
   bool hasWitness(ValueDecl *requirement) const {
+    // narrowed-Any dispatch builtins synthesize SIL trap-stub thunks
+    // for each protocol method, so a witness-table entry exists at
+    // the SIL level even though there is no user-written witness
+    // decl. Returning false here makes consumers (e.g. CalleeCache)
+    // treat them as "unresolved" — conservative but valid.
+    if (getBuiltinConformanceKind() ==
+        BuiltinConformanceKind::NarrowedAnyDispatch)
+      return false;
     llvm_unreachable("builtin-conformances never have requirement witnesses");
   }
 
