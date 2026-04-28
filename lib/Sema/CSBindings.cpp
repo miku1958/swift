@@ -2810,7 +2810,15 @@ void PotentialBindings::infer(Constraint *constraint) {
     // for an integer literal — direct-leaves-only would jump straight
     // to Float because the inner narrowed-Any itself doesn't conform
     // to ExpressibleByIntegerLiteral.
-    {
+    //
+    // Gate on the type variable already having a literal protocol
+    // requirement; otherwise we'd offer leaf bindings to ordinary
+    // expressions whose narrowed-Any type happens to be a contextual
+    // upper bound (e.g. `let v: V = c.firstOrError` where firstOrError
+    // returns V) and the solver could pick a leaf binding that
+    // breaks structural typing downstream — observed in
+    // test-phase2f-runtime §12h `try? throwing-narrowed-Any-getter`.
+    if (!Literals.empty()) {
       Type peeled = binding->BindingType;
       if (auto *ext = peeled->getAs<ExistentialType>())
         peeled = ext->getConstraintType();
