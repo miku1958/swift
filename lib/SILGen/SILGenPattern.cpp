@@ -1606,9 +1606,98 @@ void PatternMatchEmission::emitSpecializedDispatch(ClauseMatrix &clauses,
   case PatternKind::Is:
     return emitIsDispatch(rowsToSpecialize, arg, handler, failure);
   case PatternKind::EnumElement:
-  case PatternKind::OptionalSome:
+  case PatternKind::OptionalSome: {
+    // Phase 3.F slice 35 probe F: arg is `$*any V` where V is a
+    // narrowed-Any with an enum leaf. emitEnumElementDispatch
+    // expects src to be enum-typed at the SIL level. Allocate a
+    // leaf-enum-typed dest slot, run checked_cast_addr_br into it
+    // (which writes the leaf bytes), then load and dispatch on
+    // the loadable enum value (Color is no-payload, so loadable).
+    Type peeled = arg.getType().getASTType();
+    if (auto *ext = peeled->getAs<ExistentialType>())
+      peeled = ext->getConstraintType();
+    if (firstSpecializer->getKind() == PatternKind::EnumElement &&
+        peeled->is<NarrowedAnyType>()) {
+      auto *eep = cast<EnumElementPattern>(firstSpecializer);
+      auto *eed = eep->getElementDecl();
+      if (!eed)
+        return emitEnumElementDispatch(rowsToSpecialize, arg, handler, failure,
+                                       defaultCaseCount);
+      // The pattern's own type is the narrowed-Any subject (V),
+      // not the enum leaf — walk to the EnumElementDecl's owning
+      // enum to get the actual Color type.
+      CanType srcASTType = arg.getType().getASTType();
+      CanType enumCanType =
+          eed->getParentEnum()->getDeclaredInterfaceType()->getCanonicalType();
+      RegularLocation castLoc(PatternMatchStmt, firstSpecializer, SGF.SGM.M);
+
+      SILType enumValueType = SGF.getLoweredType(enumCanType);
+      SILValue destAddr =
+          SGF.B.createAllocStack(castLoc, enumValueType);
+
+      SILValue srcAddr = arg.getFinalManagedValue().getValue();
+
+      SILBasicBlock *successBB = SGF.createBasicBlock();
+      SILBasicBlock *failureBB = SGF.createBasicBlock();
+
+      SGF.B.createCheckedCastAddrBranch(
+          castLoc, CheckedCastInstOptions(),
+          CastConsumptionKind::CopyOnSuccess,
+          srcAddr, srcASTType,
+          destAddr, enumCanType,
+          successBB, failureBB);
+
+      // Failure: deallocate the dest slot and route to failure.
+      SGF.B.setInsertionPoint(failureBB);
+      SGF.B.createDeallocStack(castLoc, destAddr);
+      failure(castLoc);
+      assert(!SGF.B.hasValidInsertionPoint() && "failure didn't end block");
+
+      // Success: dispatch the enum cases on the leaf-typed dest.
+      SGF.B.setInsertionPoint(successBB);
+      ManagedValue destMV;
+      if (enumValueType.isLoadable(SGF.F)) {
+        // Loadable enum — pick the load qualifier based on the
+        // value's ownership: trivial enums (no-payload like Color)
+        // load with Trivial qualifier and produce None-ownership
+        // values; non-trivial loadable enums use Take.
+        bool isTrivial = enumValueType.isTrivial(SGF.F);
+        SILValue loaded = SGF.B.createLoad(
+            castLoc, destAddr,
+            isTrivial ? LoadOwnershipQualifier::Trivial
+                      : LoadOwnershipQualifier::Take);
+        SGF.B.createDeallocStack(castLoc, destAddr);
+        destMV = isTrivial
+                     ? ManagedValue::forRValueWithoutOwnership(loaded)
+                     : SGF.emitManagedRValueWithCleanup(loaded);
+      } else {
+        // Address-only enum — pass the dest address with a cleanup
+        // to dealloc + destroy.
+        destMV = SGF.emitManagedBufferWithCleanup(destAddr);
+      }
+      // Rewrite each row's pattern type to the enum leaf so
+      // emitEnumElementDispatch's CaseBlocks can derive
+      // enumDecl correctly. The Sema-time type was the narrowed-Any
+      // subject (V); for the cast-target dispatch all the cases
+      // operate on the leaf type.
+      for (auto &row : rowsToSpecialize) {
+        if (auto *eep = dyn_cast<EnumElementPattern>(row.Pattern)) {
+          if (eep->getElementDecl() &&
+              eep->getElementDecl()->getParentEnum() ==
+                  enumCanType->getEnumOrBoundGenericEnum()) {
+            const_cast<EnumElementPattern *>(eep)->setType(enumCanType);
+          }
+        }
+      }
+      emitEnumElementDispatch(rowsToSpecialize,
+                              ConsumableManagedValue::forOwned(destMV),
+                              handler, failure, defaultCaseCount);
+      assert(!SGF.B.hasValidInsertionPoint() && "did not end block");
+      return;
+    }
     return emitEnumElementDispatch(rowsToSpecialize, arg, handler, failure,
                                    defaultCaseCount);
+  }
   case PatternKind::Bool:
     return emitBoolDispatch(rowsToSpecialize, arg, handler, failure);
   }

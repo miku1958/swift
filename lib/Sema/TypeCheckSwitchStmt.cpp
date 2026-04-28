@@ -359,8 +359,16 @@ namespace {
           return false;
 
         PAIRCASE (SpaceKind::Constructor, SpaceKind::Type):
-          // Typechecking guaranteed this constructor is a subspace of the type.
-          return true;
+          // Phase 3.F slice 35: narrowed-Any subjects decompose
+          // per-leaf so a Constructor for one leaf compared against
+          // another leaf's Type isn't a subspace.
+          if (this->getType()->isEqual(other.getType()))
+            return true;
+          if (canDecompose(other.getType())) {
+            Space or2Space = decompose(DC, other.getType(), {});
+            return this->isSubspace(or2Space, DC);
+          }
+          return false;
         PAIRCASE (SpaceKind::UnknownCase, SpaceKind::Type):
           return true;
         PAIRCASE (SpaceKind::BooleanConstant, SpaceKind::Type):
@@ -1036,48 +1044,9 @@ namespace {
             return projection.isSubspace(handled, DC);
           });
           if (isRedundant) {
-            // Phase 3.F slice 35 partial: when the subject is a
-            // narrowed-Any and the case pattern is an EnumElement
-            // pattern whose owning enum is a leaf of the subject,
-            // the underlying isSubspace(Constructor, Type) check
-            // returns the wrong answer because pre-narrowed-Any
-            // it assumed "typechecking guaranteed it's a subspace"
-            // — true when subject's Type covers everything but
-            // false when subject decomposes per-leaf and the
-            // constructor's enum is a *different* leaf than the
-            // currently-handled space's Type. Suppress the
-            // resulting noisy "case is already handled" warning
-            // for that narrow shape; the standard exhaustiveness
-            // error still surfaces non-coverage, and the latent
-            // SILGen crash on this pattern is documented as a
-            // multi-day Phase-3 follow-up.
-            bool suppress = false;
-            if (auto *narrowedSubject =
-                    Space::getNarrowedAny(subjectType)) {
-              if (auto *eep = dyn_cast<EnumElementPattern>(
-                      caseItem.getPattern())) {
-                // Determine the enum's owning nominal type — the
-                // pattern's own type may be the narrowed-Any
-                // subject when contextually inferred, so we walk
-                // to the EnumElementDecl's parent enum.
-                Type enumOwner;
-                if (auto *eed = eep->getElementDecl())
-                  enumOwner = eed->getParentEnum()->getDeclaredInterfaceType();
-                if (enumOwner) {
-                  for (Type alt : narrowedSubject->getAlternatives()) {
-                    if (alt->isEqual(enumOwner)) {
-                      suppress = true;
-                      break;
-                    }
-                  }
-                }
-              }
-            }
-            if (!suppress) {
-              DE.diagnose(caseItem.getStartLoc(),
-                            diag::redundant_particular_case)
-                .highlight(caseItem.getSourceRange());
-            }
+            DE.diagnose(caseItem.getStartLoc(),
+                          diag::redundant_particular_case)
+              .highlight(caseItem.getSourceRange());
             continue;
           }
 
