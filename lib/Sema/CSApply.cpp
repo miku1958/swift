@@ -4263,6 +4263,25 @@ namespace {
         collectDeepLeaves(peeledFrom, srcDeep);
         if (srcDeep.count(peeledTo->getCanonicalType().getPointer()))
           return;
+        // Slice 29: class-hierarchy cast. If peeledTo is a class and
+        // any deep leaf has a superclass relationship with it in
+        // either direction, the cast is potentially feasible — don't
+        // warn. Without this, V = Dog|Cat → Animal incorrectly flags
+        // as "always fails" even though every Dog and Cat IS-A Animal
+        // at runtime.
+        if (peeledTo->getClassOrBoundGenericClass()) {
+          for (auto *deepLeaf : srcDeep) {
+            Type leafTy(deepLeaf);
+            // Upcast: every value of leafTy *is* a peeledTo at runtime
+            // (peeledTo is a superclass of leafTy).
+            if (peeledTo->isExactSuperclassOf(leafTy))
+              return;
+            // Downcast: a value of leafTy *might* be a peeledTo if
+            // leafTy is a superclass of peeledTo (runtime decides).
+            if (leafTy->isExactSuperclassOf(peeledTo))
+              return;
+          }
+        }
         ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_cast_nonleaf,
                            fromType, toType, diagSelect);
         llvm::SmallString<128> leafBuf;
@@ -4292,6 +4311,20 @@ namespace {
         collectDeepLeaves(peeledTo, tgtDeep);
         if (tgtDeep.count(peeledFrom->getCanonicalType().getPointer()))
           return;
+        // Slice 29 mirror: class-hierarchy cast in Direction B.
+        // `let a: Animal = Dog(); let v: V? = a as? V` (V = Dog|Cat)
+        // is feasible because the runtime can downcast Animal to Dog
+        // or Cat depending on the dynamic type. Likewise an upcast
+        // (peeledFrom is a subclass of some leaf) is also feasible.
+        if (peeledFrom->getClassOrBoundGenericClass()) {
+          for (auto *tgtLeaf : tgtDeep) {
+            Type leafTy(tgtLeaf);
+            if (peeledFrom->isExactSuperclassOf(leafTy))
+              return;  // Downcast: runtime decides per dynamic type.
+            if (leafTy->isExactSuperclassOf(peeledFrom))
+              return;  // Upcast: leaf is a superclass of source.
+          }
+        }
         ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_cast_nonleaf_to,
                            fromType, toType, diagSelect);
         llvm::SmallString<128> leafBuf;

@@ -1497,6 +1497,20 @@ Pattern *TypeChecker::coercePatternToType(
           bool isLeaf =
               srcDeep.count(peeledTo->getCanonicalType().getPointer()) != 0;
           emit = !isLeaf;
+          // Slice 29: skip when peeledTo is a class with a superclass
+          // relationship to any leaf (either direction). Without this
+          // a `case let x as Animal` arm against `V = Dog | Cat` would
+          // incorrectly warn even though every leaf IS-A Animal.
+          if (emit && peeledTo->getClassOrBoundGenericClass()) {
+            for (auto *deepLeaf : srcDeep) {
+              Type leafTy(deepLeaf);
+              if (peeledTo->isExactSuperclassOf(leafTy) ||
+                  leafTy->isExactSuperclassOf(peeledTo)) {
+                emit = false;
+                break;
+              }
+            }
+          }
         }
 
         if (emit) {
