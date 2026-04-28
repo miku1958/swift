@@ -2966,8 +2966,31 @@ bool ContextualFailure::diagnoseAsError() {
         }
         if (allLeavesConformToAll) {
           Type firstProto = userProtocols.front()->getDeclaredInterfaceType();
-          emitDiagnostic(diag::narrowed_any_implicit_erase_unsupported,
-                         fromType, firstProto);
+          auto note = emitDiagnostic(
+              diag::narrowed_any_implicit_erase_unsupported,
+              fromType, firstProto);
+          // Suggest the as!-cast fix as a fix-it appended to the
+          // source expression. The cast surface is already wired
+          // through swift_dynamicCast + slice 23 deep-leaf check,
+          // so the user can apply it without further changes.
+          // Insert `as! any P` (modern existential spelling) — bare
+          // `as! P` would compile but trip the SE-0335 ExistentialAny
+          // future-warning. peeledTo is the existential type; print
+          // it with `any ` prefix on the constraint(s).
+          auto srcRange = getSourceRange();
+          if (srcRange.isValid()) {
+            llvm::SmallString<48> fixIt;
+            llvm::raw_svector_ostream fixItOS(fixIt);
+            fixItOS << " as! any ";
+            // Walk back to the constraint composition (e.g. P & Q)
+            // so the fix-it spells the full target rather than just
+            // the leaf protocol the diagnostic narrowed to.
+            Type ctype = peeledTo;
+            if (auto *ext = peeledTo->getAs<ExistentialType>())
+              ctype = ext->getConstraintType();
+            ctype->print(fixItOS);
+            note.fixItInsertAfter(srcRange.End, fixIt.str());
+          }
         }
       }
     }
