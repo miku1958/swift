@@ -7857,7 +7857,15 @@ public:
 
   void visitExistentialType(ExistentialType *T,
                             NonRecursivePrintOptions nrOptions) {
-    if (T->shouldPrintWithAny())
+    // Slice 40: narrowed-Any (`A | B`) is *already* an existential
+    // when re-parsed (post-slice-3 `resolveType` returns
+    // `ExistentialType::get(NarrowedAnyType)`), so prefixing with
+    // `any` here would round-trip as `any any (A | B)` — the
+    // textual-interface verifier rejects that as "redundant 'any'".
+    // Skip the `any` keyword when the constraint is narrowed-Any;
+    // the bare `A | B` spelling carries its own existential-ness.
+    bool isNarrowedAny = T->getConstraintType()->is<NarrowedAnyType>();
+    if (T->shouldPrintWithAny() && !isNarrowedAny)
       Printer << "any ";
 
     // FIXME: The desugared type is used here only to support
