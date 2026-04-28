@@ -4277,6 +4277,15 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
     // `removeFix`. When the solver is inactive (direct simplifier
     // call, no trail), there is no trail to consult, but `Fixes` may
     // still have accumulated entries we need to drop.
+    // Slice 33 polish: do BOTH trail-undo (when solver is active)
+    // AND a defensive Fixes pop. Trail-driven undo removes AddedFix
+    // entries from the Solution bookkeeping, but a few `recordFix`
+    // code paths route directly through `Fixes.insert` without
+    // touching the trail. Without the secondary pop, those slip
+    // through and accumulate per-leaf duplicates that overwhelm the
+    // diagnostic engine for cases like `takeV(2.5)` where V =
+    // Int|String — neither leaf conforms to ExpressibleByFloatLiteral
+    // and Sema would emit "failed to produce diagnostic for expression".
     TypeMatchOptions tryflags = subflags;
     for (auto alt : layout.getNarrowedAlternatives()) {
       auto fixesBefore = Fixes.size();
@@ -4286,12 +4295,10 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
                               tryflags, locator);
       if (trial.isSuccess() && Fixes.size() == fixesBefore)
         return trial;
-      if (solverState) {
+      if (solverState)
         solverState->Trail.undo(trailBefore);
-      } else {
-        while (Fixes.size() > fixesBefore)
-          Fixes.pop_back();
-      }
+      while (Fixes.size() > fixesBefore)
+        Fixes.pop_back();
     }
     return getTypeMatchFailure(locator);
   }
