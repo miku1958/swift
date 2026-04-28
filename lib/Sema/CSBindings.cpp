@@ -2802,18 +2802,34 @@ void PotentialBindings::infer(Constraint *constraint) {
     // conform to ExpressibleByFloatLiteral) and the literal's stdlib
     // default (Double, which isn't in the closed leaf set). The user
     // then sees `cannot convert Double to 'X'` even though Float is
-    // a leaf of X. Add a fallback binding for each leaf so the
-    // solver can try `T := Float`/`T := Int`/etc. — leaf injection
-    // then succeeds via the standard narrowed-Any subtyping rule.
-    Type peeled = binding->BindingType;
-    if (auto *ext = peeled->getAs<ExistentialType>())
-      peeled = ext->getConstraintType();
-    if (auto *na = peeled->getAs<NarrowedAnyType>()) {
-      for (auto leaf : na->getAlternatives()) {
-        if (leaf->hasError() || leaf->is<TypeVariableType>())
-          continue;
-        addPotentialBinding(PotentialBinding(
-            leaf, binding->Kind, binding->getSource()));
+    // a leaf of X. Add a fallback binding for each *deep* leaf so the
+    // solver can try `T := Float`/`T := Int`/etc. and leaf injection
+    // succeeds via the standard narrowed-Any subtyping rule. Deep
+    // (recursive) leaves matter so a 3-level nesting like
+    // `[(Int|String|Bool)|Float]` still surfaces Int as a candidate
+    // for an integer literal — direct-leaves-only would jump straight
+    // to Float because the inner narrowed-Any itself doesn't conform
+    // to ExpressibleByIntegerLiteral.
+    {
+      Type peeled = binding->BindingType;
+      if (auto *ext = peeled->getAs<ExistentialType>())
+        peeled = ext->getConstraintType();
+      if (peeled->is<NarrowedAnyType>()) {
+        std::function<void(Type)> addLeafBindings = [&](Type ty) {
+          Type p = ty;
+          if (auto *e = p->getAs<ExistentialType>())
+            p = e->getConstraintType();
+          if (auto *n = p->getAs<NarrowedAnyType>()) {
+            for (auto alt : n->getAlternatives())
+              addLeafBindings(alt);
+            return;
+          }
+          if (ty->hasError() || ty->is<TypeVariableType>())
+            return;
+          addPotentialBinding(PotentialBinding(
+              ty, binding->Kind, binding->getSource()));
+        };
+        addLeafBindings(peeled);
       }
     }
     break;
