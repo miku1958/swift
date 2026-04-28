@@ -1400,6 +1400,61 @@ namespace {
         DE.diagnose(startLoc, diag::missing_several_cases, false)
             .fixItInsert(insertLoc, missingSeveralCasesFixIt.str());
       }
+
+      // Slice 30: when the subject is narrowed-Any and the switch has
+      // uncovered spaces, emit a leaf-aware suggestion for each leaf
+      // that doesn't have a `case _ as Leaf:` arm in the switch. The
+      // generic "add missing case '_'" notes the SpaceEngine produces
+      // for narrowed-Any are unhelpful — the user wants to know which
+      // leaf is uncovered. (Slice 21 already folds Bool's true/false
+      // into `case _ as Bool`; this generalizes to arbitrary leaves.)
+      if (subjectIsNarrowedAny && diagnosedCases > 0) {
+        auto *na = Space::getNarrowedAny(subjectType);
+        // Collect leaves already covered by an `as` pattern in the
+        // switch's case items.
+        llvm::SmallPtrSet<TypeBase *, 4> coveredLeafTypes;
+        for (auto *caseBlock : Switch->getCases()) {
+          for (auto &caseItem : caseBlock->getCaseLabelItems()) {
+            const Pattern *p = caseItem.getPattern();
+            // Strip `var`/`let` bindings to expose the underlying
+            // pattern (so `case let x as Foo` reaches the IsPattern).
+            while (p) {
+              if (auto *vp = dyn_cast<BindingPattern>(p)) {
+                p = vp->getSubPattern();
+                continue;
+              }
+              if (auto *typedP = dyn_cast<TypedPattern>(p)) {
+                p = typedP->getSubPattern();
+                continue;
+              }
+              break;
+            }
+            if (auto *isP = dyn_cast_or_null<IsPattern>(p)) {
+              auto castTy = isP->getCastType();
+              if (castTy)
+                coveredLeafTypes.insert(
+                    castTy->getCanonicalType().getPointer());
+            }
+          }
+        }
+        for (auto leaf : na->getAlternatives()) {
+          auto canLeaf = leaf->getCanonicalType().getPointer();
+          if (coveredLeafTypes.count(canLeaf))
+            continue;
+          // Suggest `case _ as <Leaf>:` for the uncovered leaf.
+          llvm::SmallString<64> leafCaseBuf;
+          llvm::raw_svector_ostream leafCaseOS(leafCaseBuf);
+          leafCaseOS << "_ as ";
+          leaf->print(leafCaseOS);
+          llvm::SmallString<128> fixIt;
+          llvm::raw_svector_ostream fixItOS(fixIt);
+          fixItOS << tok::kw_case << " " << leafCaseBuf << ":\n"
+                  << placeholder << "\n";
+          DE.diagnose(startLoc, diag::missing_particular_case,
+                      leafCaseBuf.str())
+              .fixItInsert(insertLoc, fixIt.str());
+        }
+      }
     }
 
   private:
