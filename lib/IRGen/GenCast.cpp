@@ -248,36 +248,39 @@ llvm::Value *irgen::emitCheckedCast(IRGenFunction &IGF,
     // Slice 29 IRGen: for class leaves the existential's metadata slot
     // can hold the *static* source type (e.g. Animal) when boxing a
     // class instance — swift_dynamicCast for `Animal -> Any` doesn't
-    // re-stamp the slot with the dynamic class. The dynamic class is
-    // recoverable from the heap object's first word, which sits at
-    // offset 0 of the Any value buffer for class instances.
+    // re-stamp the slot with the dynamic class. Same applies when the
+    // source is itself a narrowed-Any whose value was boxed via the
+    // class-hierarchy path (`Animal-as-V → V-as-W`). The dynamic
+    // class is recoverable from the heap object's first word, which
+    // sits at offset 0 of the Any value buffer for class instances.
     //
     // Gate the heap-pointer load on:
-    //   (1) src type is statically a class (so the value buffer holds
-    //        a heap pointer at offset 0, not arbitrary value bits),
-    //   (2) at least one leaf is a class (otherwise no leaf to match
-    //        against the heap-derived metadata),
-    //   (3) `swift_dynamicCast` returned true (otherwise the value
-    //        buffer's contents are undefined),
-    //   (4) the value-type metadata-slot match already failed (no
-    //        need to do extra work when the slot match worked).
-    //
-    // Conditions (3) and (4) gate the heap-pointer load behind a
-    // basic-block branch; condition (1)/(2) gate it at compile time
-    // so non-class src types never emit the heap load.
-    CanType peeledSrcForHeap = srcType;
-    if (auto *ext =
-            dyn_cast<ExistentialType>(peeledSrcForHeap.getPointer()))
-      peeledSrcForHeap =
-          ext->getConstraintType()->getCanonicalType();
-    bool srcIsClass =
-        peeledSrcForHeap->getClassOrBoundGenericClass() != nullptr;
+    //   (1) at least one deep leaf is a class (compile-time — without
+    //        a class leaf, no leaf to match against),
+    //   (2) `swift_dynamicCast` returned true (runtime — otherwise
+    //        the value buffer's contents are undefined),
+    //   (3) the value-type metadata-slot match already failed (runtime
+    //        — no need to do extra work when the slot match worked),
+    //   (4) the existential's metadata is itself a class metadata
+    //        (runtime — `swift_isClassType` check; ensures dest+0
+    //        is a heap pointer rather than arbitrary value bits).
     bool anyClassLeaf = llvm::any_of(deepLeaves, [](CanType ty) {
       return ty->getClassOrBoundGenericClass() != nullptr;
     });
-    if (srcIsClass && anyClassLeaf) {
+    if (anyClassLeaf) {
+      // Combined gate: cast succeeded AND value-type match failed AND
+      // the existential metadata describes a class type.
+      // swift_isClassType(dynMeta) returns false for value-type
+      // metadata, ensuring we don't dereference dest+0 as a heap
+      // pointer when the existential holds a struct/enum value
+      // inline.
+      auto isClassFn = IGF.IGM.getIsClassTypeFunctionPointer();
+      auto *isClass = IGF.Builder.CreateCall(isClassFn, {dynMeta});
+      isClass->setDoesNotThrow();
       auto *needHeap = IGF.Builder.CreateAnd(
-          result, IGF.Builder.CreateNot(membership));
+          IGF.Builder.CreateAnd(result,
+                                IGF.Builder.CreateNot(membership)),
+          isClass);
       auto *heapBB = IGF.createBasicBlock("narrowed_any_class_leaf.heap");
       auto *contBB = IGF.createBasicBlock("narrowed_any_class_leaf.cont");
       auto *priorBB = IGF.Builder.GetInsertBlock();
