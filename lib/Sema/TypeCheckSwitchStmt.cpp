@@ -1358,6 +1358,48 @@ namespace {
       }
       bool foldBoolLeaf = sawBoolTrue && sawBoolFalse;
 
+      // Slice 30 (early): pre-compute the set of leaves the slice-30
+      // hint will emit `_ as Leaf` notes for, so the generic "_"
+      // SpaceEngine notes that would just duplicate that information
+      // can be suppressed. Without this, narrowed-Any switches with
+      // enum leaves get noisy "add missing case: '_'" lines next to
+      // the actionable `_ as Leaf` line.
+      llvm::SmallPtrSet<TypeBase *, 4> coveredLeavesEarly;
+      bool slice30HasLeafNotes = false;
+      if (subjectIsNarrowedAny) {
+        for (auto *caseBlock : Switch->getCases()) {
+          for (auto &caseItem : caseBlock->getCaseLabelItems()) {
+            const Pattern *p = caseItem.getPattern();
+            while (p) {
+              if (auto *vp = dyn_cast<BindingPattern>(p)) {
+                p = vp->getSubPattern();
+                continue;
+              }
+              if (auto *typedP = dyn_cast<TypedPattern>(p)) {
+                p = typedP->getSubPattern();
+                continue;
+              }
+              break;
+            }
+            if (auto *isP = dyn_cast_or_null<IsPattern>(p)) {
+              auto castTy = isP->getCastType();
+              if (castTy)
+                coveredLeavesEarly.insert(
+                    castTy->getCanonicalType().getPointer());
+            }
+          }
+        }
+        if (auto *na = Space::getNarrowedAny(subjectType)) {
+          for (auto leaf : na->getAlternatives()) {
+            auto canLeaf = leaf->getCanonicalType().getPointer();
+            if (!coveredLeavesEarly.count(canLeaf)) {
+              slice30HasLeafNotes = true;
+              break;
+            }
+          }
+        }
+      }
+
       processUncoveredSpaces([&](const Space &space,
                                  bool onlyOneUncoveredSpace) {
         llvm::SmallString<64> fixItBuffer;
@@ -1386,6 +1428,15 @@ namespace {
           llvm::raw_svector_ostream spaceOS(spaceBuffer);
           space.show(spaceOS);
 
+          // Slice 30 dedup: when slice 30 will emit a leaf-aware note,
+          // suppress the SpaceEngine's generic "_" placeholder note —
+          // it just duplicates the information the leaf-aware version
+          // already provides. Keep non-generic prints (real
+          // constructor / type spaces) so partial-coverage suggestions
+          // remain visible.
+          if (slice30HasLeafNotes && spaceBuffer.str() == "_")
+            return;
+
           fixItOS << tok::kw_case << " " << spaceBuffer << ":\n"
                   << placeholder << "\n";
           DE.diagnose(startLoc, diag::missing_particular_case,
@@ -1401,47 +1452,20 @@ namespace {
             .fixItInsert(insertLoc, missingSeveralCasesFixIt.str());
       }
 
-      // Slice 30: when the subject is narrowed-Any and the switch has
-      // uncovered spaces, emit a leaf-aware suggestion for each leaf
-      // that doesn't have a `case _ as Leaf:` arm in the switch. The
-      // generic "add missing case '_'" notes the SpaceEngine produces
-      // for narrowed-Any are unhelpful — the user wants to know which
-      // leaf is uncovered. (Slice 21 already folds Bool's true/false
-      // into `case _ as Bool`; this generalizes to arbitrary leaves.)
-      if (subjectIsNarrowedAny && diagnosedCases > 0) {
+      // Slice 30: when the subject is narrowed-Any, emit a leaf-aware
+      // suggestion for each leaf that doesn't have a `case _ as Leaf:`
+      // arm in the switch. The generic "add missing case '_'" notes
+      // the SpaceEngine produces for narrowed-Any aren't actionable —
+      // the user wants to know which leaf is uncovered. Slice 21
+      // already folds Bool's true/false into `case _ as Bool`; this
+      // generalizes to arbitrary leaves. The generic '_' notes get
+      // suppressed inline above when slice 30 fires.
+      if (subjectIsNarrowedAny && slice30HasLeafNotes) {
         auto *na = Space::getNarrowedAny(subjectType);
-        // Collect leaves already covered by an `as` pattern in the
-        // switch's case items.
-        llvm::SmallPtrSet<TypeBase *, 4> coveredLeafTypes;
-        for (auto *caseBlock : Switch->getCases()) {
-          for (auto &caseItem : caseBlock->getCaseLabelItems()) {
-            const Pattern *p = caseItem.getPattern();
-            // Strip `var`/`let` bindings to expose the underlying
-            // pattern (so `case let x as Foo` reaches the IsPattern).
-            while (p) {
-              if (auto *vp = dyn_cast<BindingPattern>(p)) {
-                p = vp->getSubPattern();
-                continue;
-              }
-              if (auto *typedP = dyn_cast<TypedPattern>(p)) {
-                p = typedP->getSubPattern();
-                continue;
-              }
-              break;
-            }
-            if (auto *isP = dyn_cast_or_null<IsPattern>(p)) {
-              auto castTy = isP->getCastType();
-              if (castTy)
-                coveredLeafTypes.insert(
-                    castTy->getCanonicalType().getPointer());
-            }
-          }
-        }
         for (auto leaf : na->getAlternatives()) {
           auto canLeaf = leaf->getCanonicalType().getPointer();
-          if (coveredLeafTypes.count(canLeaf))
+          if (coveredLeavesEarly.count(canLeaf))
             continue;
-          // Suggest `case _ as <Leaf>:` for the uncovered leaf.
           llvm::SmallString<64> leafCaseBuf;
           llvm::raw_svector_ostream leafCaseOS(leafCaseBuf);
           leafCaseOS << "_ as ";
