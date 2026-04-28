@@ -295,15 +295,32 @@ llvm::Value *irgen::emitCheckedCast(IRGenFunction &IGF,
       auto *heapMeta = IGF.Builder.CreateLoad(heapMetaSlot,
                                               IGF.IGM.TypeMetadataPtrTy,
                                               IGF.IGM.getPointerAlignment());
+      // Use emitClassDowncast (Conditional) for each class leaf. The
+      // runtime helper walks the superclass chain so a Puppy instance
+      // matches a Dog leaf via subclass relationship — pointer
+      // equality on metadata alone would miss that. Returns the heap
+      // pointer on cast success or null on failure; we OR (result
+      // != null) into the membership flag.
       llvm::Value *heapMatch =
           llvm::ConstantInt::getFalse(IGF.IGM.getLLVMContext());
+      auto *nullPtr = llvm::ConstantPointerNull::get(IGF.IGM.Int8PtrTy);
       for (auto leafCanTy : deepLeaves) {
         if (!leafCanTy->getClassOrBoundGenericClass())
           continue;
-        auto *leafMeta = IGF.emitTypeMetadataRef(leafCanTy);
-        auto *eq = IGF.Builder.CreateICmpEQ(heapMeta, leafMeta);
-        heapMatch = IGF.Builder.CreateOr(heapMatch, eq);
+        auto *castResult = emitClassDowncast(IGF, heapObj, leafCanTy,
+                                             CheckedCastMode::Conditional);
+        // emitClassDowncast may return a typed value; bit-cast to i8*
+        // for the null check.
+        if (castResult->getType() != IGF.IGM.Int8PtrTy)
+          castResult = IGF.Builder.CreateBitOrPointerCast(
+              castResult, IGF.IGM.Int8PtrTy);
+        auto *isMatch = IGF.Builder.CreateICmpNE(castResult, nullPtr);
+        heapMatch = IGF.Builder.CreateOr(heapMatch, isMatch);
       }
+      // Suppress unused-variable warning when there are no class leaves
+      // (won't happen because we gated on anyClassLeaf, but keeps
+      // analyzers quiet if the loop body is conditional).
+      (void)heapMeta;
       // Combine the prior membership with heapMatch *inside* heapBB so
       // the OR dominates the phi's heap-path incoming value. Creating
       // it in contBB (the default after emitBlock) would place it past
