@@ -103,6 +103,13 @@ bool ExistentialSpecializer::findConcreteTypeFromSoleConformingType(
   /// Do not handle composition types yet.
   if (isa<ProtocolCompositionType>(constraint))
     return false;
+  /// Narrowed-Any (`A | B`) is a closed-leaf existential with no sole
+  /// conforming type — the leaf set IS the concrete-type set, by
+  /// design. Bailing out here also prevents the dyn_cast<ProtocolDecl>
+  /// below from asserting on `getAnyNominal()`'s null result for a
+  /// non-nominal NarrowedAnyType.
+  if (isa<NarrowedAnyType>(constraint))
+    return false;
   assert(ArgType.isExistentialType());
   /// Find the protocol decl.
   auto *PD = dyn_cast<ProtocolDecl>(constraint->getAnyNominal());

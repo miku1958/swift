@@ -671,6 +671,24 @@ void NormalProtocolConformance::setTypeWitness(AssociatedTypeDecl *assocType,
 ProtocolConformanceRef
 ProtocolConformance::getAssociatedConformance(Type assocType,
                                               ProtocolDecl *protocol) const {
+  // Slice 38: NarrowedAnyDispatch flavors of BuiltinProtocolConformance
+  // synthesize the associated conformance for narrowed-Any → P using the
+  // same builtin mechanism as the original. SIL GenericSpecializer asks
+  // for e.g. Hashable's `Self: Equatable` refinement when substituting a
+  // witness for a narrowed-Any Self; since Hashable's leaves already
+  // satisfy Equatable (Hashable refines Equatable, so the leaf-set must
+  // satisfy both), return a sibling NarrowedAnyDispatch conformance for
+  // the requested associated protocol. Avoids the
+  // BuiltinProtocolConformance default `unreachable` in the header.
+  if (auto *builtin = dyn_cast<BuiltinProtocolConformance>(this)) {
+    if (builtin->getBuiltinConformanceKind() ==
+        BuiltinConformanceKind::NarrowedAnyDispatch) {
+      return ProtocolConformanceRef(
+          getType()->getASTContext().getBuiltinConformance(
+              getType()->getCanonicalType(), protocol,
+              BuiltinConformanceKind::NarrowedAnyDispatch));
+    }
+  }
   CONFORMANCE_SUBCLASS_DISPATCH(getAssociatedConformance,
                                 (assocType, protocol))
 }
