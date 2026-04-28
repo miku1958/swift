@@ -2918,6 +2918,60 @@ bool ContextualFailure::diagnoseAsError() {
   diag.highlight(getSourceRange());
 
   (void)tryFixIts(diag);
+
+  // Slice 27 hint: if every leaf of a narrowed-Any source conforms to
+  // every protocol in the target existential, the conversion is
+  // semantically valid but blocked by route-2 ABI work (the opened
+  // archetype's generic signature doesn't carry the protocol, so
+  // SILGen's getConformancePath aborts). Tell the user the work
+  // around — `as!` force-cast routes through swift_dynamicCast and
+  // dispatches via the leaf's runtime metadata correctly.
+  {
+    Type peeledFrom = fromType;
+    if (auto opt = peeledFrom->getOptionalObjectType())
+      peeledFrom = opt;
+    if (auto *ext = peeledFrom->getAs<ExistentialType>())
+      peeledFrom = ext->getConstraintType();
+    auto *na = peeledFrom->getAs<NarrowedAnyType>();
+
+    Type peeledTo = toType;
+    if (auto opt = peeledTo->getOptionalObjectType())
+      peeledTo = opt;
+    Type toConstraint = peeledTo;
+    if (auto *ext = peeledTo->getAs<ExistentialType>())
+      toConstraint = ext->getConstraintType();
+
+    if (na && toConstraint->isConstraintType() &&
+        peeledTo->isExistentialType()) {
+      auto layout = peeledTo->getExistentialLayout();
+      // Filter to user-written non-marker protocols. Composition layout
+      // includes invertible Copyable/Escapable defaults, which would
+      // otherwise leak into the note's "%1" slot ("conforms to
+      // Copyable") even when the user wrote `any Equatable`.
+      llvm::SmallVector<ProtocolDecl *, 2> userProtocols;
+      for (auto *proto : layout.getProtocols())
+        if (!proto->isMarkerProtocol())
+          userProtocols.push_back(proto);
+      if (!userProtocols.empty()) {
+        bool allLeavesConformToAll = true;
+        for (auto *proto : userProtocols) {
+          for (Type alt : na->getAlternatives()) {
+            if (!checkConformance(alt, proto)) {
+              allLeavesConformToAll = false;
+              break;
+            }
+          }
+          if (!allLeavesConformToAll)
+            break;
+        }
+        if (allLeavesConformToAll) {
+          Type firstProto = userProtocols.front()->getDeclaredInterfaceType();
+          emitDiagnostic(diag::narrowed_any_implicit_erase_unsupported,
+                         fromType, firstProto);
+        }
+      }
+    }
+  }
   return true;
 }
 
