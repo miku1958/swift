@@ -2958,82 +2958,25 @@ bool ContextualFailure::diagnoseAsError() {
 
   (void)tryFixIts(diag);
 
-  // Slice 27 hint: if every leaf of a narrowed-Any source conforms to
-  // every protocol in the target existential, the conversion is
-  // semantically valid but blocked by route-2 ABI work (the opened
-  // archetype's generic signature doesn't carry the protocol, so
-  // SILGen's getConformancePath aborts). Tell the user the work
-  // around — `as!` force-cast routes through swift_dynamicCast and
-  // dispatches via the leaf's runtime metadata correctly.
-  {
-    Type peeledFrom = fromType;
-    if (auto opt = peeledFrom->getOptionalObjectType())
-      peeledFrom = opt;
-    if (auto *ext = peeledFrom->getAs<ExistentialType>())
-      peeledFrom = ext->getConstraintType();
-    auto *na = peeledFrom->getAs<NarrowedAnyType>();
-
-    Type peeledTo = toType;
-    if (auto opt = peeledTo->getOptionalObjectType())
-      peeledTo = opt;
-    Type toConstraint = peeledTo;
-    if (auto *ext = peeledTo->getAs<ExistentialType>())
-      toConstraint = ext->getConstraintType();
-
-    if (na && toConstraint->isConstraintType() &&
-        peeledTo->isExistentialType()) {
-      auto layout = peeledTo->getExistentialLayout();
-      // Filter to user-written non-marker protocols. Composition layout
-      // includes invertible Copyable/Escapable defaults, which would
-      // otherwise leak into the note's "%1" slot ("conforms to
-      // Copyable") even when the user wrote `any Equatable`.
-      llvm::SmallVector<ProtocolDecl *, 2> userProtocols;
-      for (auto *proto : layout.getProtocols())
-        if (!proto->isMarkerProtocol())
-          userProtocols.push_back(proto);
-      if (!userProtocols.empty()) {
-        bool allLeavesConformToAll = true;
-        for (auto *proto : userProtocols) {
-          for (Type alt : na->getAlternatives()) {
-            if (!checkConformance(alt, proto)) {
-              allLeavesConformToAll = false;
-              break;
-            }
-          }
-          if (!allLeavesConformToAll)
-            break;
-        }
-        if (allLeavesConformToAll) {
-          Type firstProto = userProtocols.front()->getDeclaredInterfaceType();
-          auto note = emitDiagnostic(
-              diag::narrowed_any_implicit_erase_unsupported,
-              fromType, firstProto);
-          // Suggest the as!-cast fix as a fix-it appended to the
-          // source expression. The cast surface is already wired
-          // through swift_dynamicCast + slice 23 deep-leaf check,
-          // so the user can apply it without further changes.
-          // Insert `as! any P` (modern existential spelling) — bare
-          // `as! P` would compile but trip the SE-0335 ExistentialAny
-          // future-warning. peeledTo is the existential type; print
-          // it with `any ` prefix on the constraint(s).
-          auto srcRange = getSourceRange();
-          if (srcRange.isValid()) {
-            llvm::SmallString<48> fixIt;
-            llvm::raw_svector_ostream fixItOS(fixIt);
-            fixItOS << " as! any ";
-            // Walk back to the constraint composition (e.g. P & Q)
-            // so the fix-it spells the full target rather than just
-            // the leaf protocol the diagnostic narrowed to.
-            Type ctype = peeledTo;
-            if (auto *ext = peeledTo->getAs<ExistentialType>())
-              ctype = ext->getConstraintType();
-            ctype->print(fixItOS);
-            note.fixItInsertAfter(srcRange.End, fixIt.str());
-          }
-        }
-      }
-    }
-  }
+  // Slice 27 hint (assignment-context form): when every leaf of a
+  // narrowed-Any source conforms to every protocol in the target
+  // existential, point the user at `as!` (the route-2 escape hatch)
+  // with a fix-it that appends ` as! any P` to the source expression.
+  (void)tryEmitNarrowedAnyImplicitEraseHint(
+      fromType, toType,
+      [&](InFlightDiagnostic &note, Type peeledTo) {
+        auto srcRange = getSourceRange();
+        if (!srcRange.isValid())
+          return;
+        llvm::SmallString<48> fixIt;
+        llvm::raw_svector_ostream fixItOS(fixIt);
+        fixItOS << " as! any ";
+        Type ctype = peeledTo;
+        if (auto *ext = peeledTo->getAs<ExistentialType>())
+          ctype = ext->getConstraintType();
+        ctype->print(fixItOS);
+        note.fixItInsertAfter(srcRange.End, fixIt.str());
+      });
 
   // Slice 28 hint: literal-default type doesn't fit a narrowed-Any
   // contextual type because the default isn't in the leaf set, but
@@ -3370,6 +3313,54 @@ void ContextualFailure::tryFixIts(InFlightDiagnostic &diagnostic) const {
     return;
 }
 
+bool ContextualFailure::tryEmitNarrowedAnyImplicitEraseHint(
+    Type fromType, Type toType,
+    llvm::function_ref<void(InFlightDiagnostic &, Type)> fixIt) const {
+  Type peeledFrom = fromType;
+  if (auto opt = peeledFrom->getOptionalObjectType())
+    peeledFrom = opt;
+  if (auto *ext = peeledFrom->getAs<ExistentialType>())
+    peeledFrom = ext->getConstraintType();
+  auto *na = peeledFrom->getAs<NarrowedAnyType>();
+  if (!na)
+    return false;
+
+  Type peeledTo = toType;
+  if (auto opt = peeledTo->getOptionalObjectType())
+    peeledTo = opt;
+  Type toConstraint = peeledTo;
+  if (auto *ext = peeledTo->getAs<ExistentialType>())
+    toConstraint = ext->getConstraintType();
+
+  if (!toConstraint->isConstraintType() || !peeledTo->isExistentialType())
+    return false;
+
+  // Filter to user-written non-marker protocols. Composition layout
+  // includes invertible Copyable/Escapable defaults, which would
+  // otherwise leak into the note's "%1" slot ("conforms to
+  // Copyable") even when the user wrote `any Equatable`.
+  auto layout = peeledTo->getExistentialLayout();
+  llvm::SmallVector<ProtocolDecl *, 2> userProtocols;
+  for (auto *proto : layout.getProtocols())
+    if (!proto->isMarkerProtocol())
+      userProtocols.push_back(proto);
+  if (userProtocols.empty())
+    return false;
+
+  for (auto *proto : userProtocols) {
+    for (Type alt : na->getAlternatives()) {
+      if (!checkConformance(alt, proto))
+        return false;
+    }
+  }
+
+  Type firstProto = userProtocols.front()->getDeclaredInterfaceType();
+  auto note = emitDiagnostic(diag::narrowed_any_implicit_erase_unsupported,
+                             fromType, firstProto);
+  fixIt(note, peeledTo);
+  return true;
+}
+
 bool ContextualFailure::diagnoseCoercionToUnrelatedType() const {
   auto anchor = getRawAnchor();
   auto *coerceExpr = getAsExpr<CoerceExpr>(anchor);
@@ -3387,60 +3378,19 @@ bool ContextualFailure::diagnoseCoercionToUnrelatedType() const {
 
   (void)tryFixIts(diag);
 
-  // Phase 3.F slice 27 follow-up: when a `v as any P` coercion fails
-  // and v is a narrowed-Any whose every leaf conforms to P, point
-  // the user at `as!` (the route-2-not-yet-wired escape hatch). Same
-  // hint the standard contextual conversion path emits, but
-  // diagnoseCoercionToUnrelatedType returns true early above
-  // ContextualFailure::diagnoseAsError reaches the regular slice 27
-  // emission point, so we duplicate the check here.
-  Type peeledFrom = fromType;
-  if (auto opt = peeledFrom->getOptionalObjectType())
-    peeledFrom = opt;
-  if (auto *ext = peeledFrom->getAs<ExistentialType>())
-    peeledFrom = ext->getConstraintType();
-  auto *na = peeledFrom->getAs<NarrowedAnyType>();
-
-  Type peeledTo = toType;
-  if (auto opt = peeledTo->getOptionalObjectType())
-    peeledTo = opt;
-  Type toConstraint = peeledTo;
-  if (auto *ext = peeledTo->getAs<ExistentialType>())
-    toConstraint = ext->getConstraintType();
-
-  if (na && toConstraint->isConstraintType() &&
-      peeledTo->isExistentialType()) {
-    auto layout = peeledTo->getExistentialLayout();
-    llvm::SmallVector<ProtocolDecl *, 2> userProtocols;
-    for (auto *proto : layout.getProtocols())
-      if (!proto->isMarkerProtocol())
-        userProtocols.push_back(proto);
-    if (!userProtocols.empty()) {
-      bool allLeavesConformToAll = true;
-      for (auto *proto : userProtocols) {
-        for (Type alt : na->getAlternatives()) {
-          if (!checkConformance(alt, proto)) {
-            allLeavesConformToAll = false;
-            break;
-          }
-        }
-        if (!allLeavesConformToAll)
-          break;
-      }
-      if (allLeavesConformToAll) {
-        Type firstProto = userProtocols.front()->getDeclaredInterfaceType();
-        auto note = emitDiagnostic(
-            diag::narrowed_any_implicit_erase_unsupported,
-            fromType, firstProto);
-        // Fix-it: replace `as` with `as!` (single-character delta).
+  // Phase 3.F slice 27 follow-up (CoerceExpr form): replace `as`
+  // with `as!` in-place. Same hint as the assignment-context path
+  // but a different fix-it (single-token replacement vs trailing
+  // insert).
+  (void)tryEmitNarrowedAnyImplicitEraseHint(
+      fromType, toType,
+      [&](InFlightDiagnostic &note, Type /*peeledTo*/) {
         if (coerceExpr->getAsLoc().isValid()) {
           note.fixItReplace(SourceRange(coerceExpr->getAsLoc(),
                                         coerceExpr->getAsLoc()),
                             "as!");
         }
-      }
-    }
-  }
+      });
 
   return true;
 }

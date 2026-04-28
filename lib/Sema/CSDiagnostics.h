@@ -702,6 +702,18 @@ public:
   /// Diagnose failed conversion in a `CoerceExpr`.
   bool diagnoseCoercionToUnrelatedType() const;
 
+  /// Phase 3.F slice 27: when a narrowed-Any source is being implicitly
+  /// erased to a protocol existential whose every leaf conforms to,
+  /// emit the "use a force-cast (as!)" hint and run the supplied
+  /// fix-it strategy. Returns true iff the hint fired.
+  ///
+  /// `fixIt` is invoked with the in-flight note diagnostic and the
+  /// peeled existential target type so the caller can choose between
+  /// "insert ` as! any P`" / "replace `as` with `as!`" / no fix-it.
+  bool tryEmitNarrowedAnyImplicitEraseHint(
+      Type fromType, Type toType,
+      llvm::function_ref<void(InFlightDiagnostic &, Type)> fixIt) const;
+
   /// Produce a specialized diagnostic if this is an invalid conversion to Bool.
   bool diagnoseConversionToBool() const;
 
