@@ -1476,6 +1476,16 @@ namespace decls_block {
     BCArray<TypeIDField> // protocols
   );
 
+  // Slice 39: narrowed-Any (`A | B`) is a sibling of protocol
+  // composition — it carries an ordered list of alternative types.
+  // Order is significant (spelling-as-identity), so the serialised
+  // alternatives are written in declaration order and read back in
+  // the same order.
+  TYPE_LAYOUT(NarrowedAnyTypeLayout,
+    NARROWED_ANY_TYPE,
+    BCArray<TypeIDField> // alternatives, in declaration order
+  );
+
   TYPE_LAYOUT(ParameterizedProtocolTypeLayout,
     PARAMETERIZED_PROTOCOL_TYPE,
     TypeIDField,         // base

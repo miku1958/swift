@@ -6279,10 +6279,14 @@ public:
 
   void
   visitNarrowedAnyType(const NarrowedAnyType *narrowed) {
-    // Phase 2 placeholder: narrowed `Any` doesn't yet have a stable
-    // serialised layout (that's Phase 3 work alongside mangling). Refuse
-    // serialisation rather than emit garbage.
-    llvm_unreachable("serialisation of narrowed `Any` not yet implemented");
+    using namespace decls_block;
+    // Slice 39: write the alternatives in declaration order
+    // (spelling-as-identity is preserved through serialisation).
+    SmallVector<TypeID, 4> alts;
+    for (Type alt : narrowed->getAlternatives())
+      alts.push_back(S.addTypeRef(alt));
+    unsigned abbrCode = S.DeclTypeAbbrCodes[NarrowedAnyTypeLayout::Code];
+    NarrowedAnyTypeLayout::emitRecord(S.Out, S.ScratchRecord, abbrCode, alts);
   }
 
   void
@@ -6560,6 +6564,7 @@ void Serializer::writeAllDeclsAndTypes() {
   registerDeclTypeAbbr<OpaqueArchetypeTypeLayout>();
   registerDeclTypeAbbr<PackArchetypeTypeLayout>();
   registerDeclTypeAbbr<ProtocolCompositionTypeLayout>();
+  registerDeclTypeAbbr<NarrowedAnyTypeLayout>();
   registerDeclTypeAbbr<ParameterizedProtocolTypeLayout>();
   registerDeclTypeAbbr<ExistentialTypeLayout>();
   registerDeclTypeAbbr<BoundGenericTypeLayout>();

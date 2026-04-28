@@ -7841,6 +7841,26 @@ Expected<Type> DESERIALIZE_TYPE(EXISTENTIAL_TYPE)(
   return ExistentialType::get(constraintType.get());
 }
 
+// Slice 39: read back a narrowed-Any type written by
+// `Serializer::TypeSerializer::visitNarrowedAnyType`. Alternatives
+// arrive in declaration order — pass them straight through to
+// `NarrowedAnyType::get` which preserves spelling identity.
+Expected<Type> DESERIALIZE_TYPE(NARROWED_ANY_TYPE)(
+    ModuleFile &MF, SmallVectorImpl<uint64_t> &scratch, StringRef blobData) {
+  ArrayRef<uint64_t> rawAltIDs;
+  decls_block::NarrowedAnyTypeLayout::readRecord(scratch, rawAltIDs);
+
+  SmallVector<Type, 4> alternatives;
+  for (TypeID altID : rawAltIDs) {
+    auto altTy = MF.getTypeChecked(altID);
+    if (!altTy)
+      return altTy.takeError();
+    alternatives.push_back(altTy.get());
+  }
+
+  return NarrowedAnyType::get(MF.getContext(), alternatives);
+}
+
 Expected<Type> DESERIALIZE_TYPE(DEPENDENT_MEMBER_TYPE)(
     ModuleFile &MF, SmallVectorImpl<uint64_t> &scratch, StringRef blobData) {
   TypeID baseID;
