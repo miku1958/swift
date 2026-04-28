@@ -15,6 +15,7 @@
 //===----------------------------------------------------------------------===//
 #include "swift/Sema/CSBindings.h"
 #include "TypeChecker.h"
+#include "swift/AST/ConformanceLookup.h"
 #include "swift/AST/ExistentialLayout.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/Basic/Assertions.h"
@@ -2823,6 +2824,14 @@ void PotentialBindings::infer(Constraint *constraint) {
       if (auto *ext = peeled->getAs<ExistentialType>())
         peeled = ext->getConstraintType();
       if (peeled->is<NarrowedAnyType>()) {
+        // Slice 25 polish: only add a leaf as a candidate binding if
+        // the leaf conforms to every literal protocol the type
+        // variable has. Adding non-conforming leaves was harmless in
+        // most cases (the solver tries them and fails) but could
+        // produce duplicate "applied fix" attempts that overwhelm the
+        // diagnostic engine — observed for `takeV(2.5)` where V =
+        // Int|String (neither leaf conforms to ExpressibleByFloatLiteral)
+        // crashed Sema with "failed to produce diagnostic".
         std::function<void(Type)> addLeafBindings = [&](Type ty) {
           Type p = ty;
           if (auto *e = p->getAs<ExistentialType>())
@@ -2834,6 +2843,10 @@ void PotentialBindings::infer(Constraint *constraint) {
           }
           if (ty->hasError() || ty->is<TypeVariableType>())
             return;
+          for (const auto &literal : Literals) {
+            if (!checkConformance(ty, literal.getProtocol()))
+              return;
+          }
           addPotentialBinding(PotentialBinding(
               ty, binding->Kind, binding->getSource()));
         };
