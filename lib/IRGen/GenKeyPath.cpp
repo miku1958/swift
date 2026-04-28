@@ -567,9 +567,28 @@ getInitializerForComputedComponent(IRGenModule &IGM,
 static llvm::Constant *
 emitMetadataTypeRefForKeyPath(IRGenModule &IGM, CanType type,
                               CanGenericSignature sig) {
+  // Slice 31: narrowed-Any reuses the Any singleton metadata at
+  // runtime (see Phase 2b.D / slice 6 / slice 9). KeyPath records the
+  // type via a mangled name and the runtime lazily demangles it via
+  // `swift_getTypeByMangledName` — the system stdlib's demangler
+  // doesn't recognize the `XN` operator, so storing the literal
+  // narrowed-Any mangling crashes at runtime ("could not demangle
+  // keypath type from 'Si_SSXN'"). Substitute Any for any narrowed-Any
+  // sub-tree before mangling so the runtime sees the same metadata
+  // it actually uses; static type-checking enforces the closed leaf
+  // set at compile time, so KeyPath users still see the spelled
+  // type at the source level.
+  Type substituted = Type(type).transformRec(
+      [](TypeBase *t) -> std::optional<Type> {
+        if (auto *na = dyn_cast<NarrowedAnyType>(t))
+          return na->getASTContext().TheAnyType;
+        return std::nullopt;
+      });
+  CanType useType = substituted->getCanonicalType();
+
   // Produce a mangled name for the type.
-  auto constant = IGM.getTypeRef(type, sig, MangledTypeRefRole::Metadata).first;
-  
+  auto constant = IGM.getTypeRef(useType, sig, MangledTypeRefRole::Metadata).first;
+
   // Mask the bottom bit to tell the key path runtime this is a mangled name
   // rather than a direct reference.
   auto bitConstant = llvm::ConstantInt::get(IGM.IntPtrTy, 1);
