@@ -510,6 +510,14 @@ bool DoCatchStmt::isSyntacticallyExhaustive() const {
 
   for (Type alt : narrowed->getAlternatives()) {
     bool found = false;
+    // For an enum leaf we accept either (a) an IsPattern for it
+    // (slice 3.D) or (b) full case-coverage by EnumElementPatterns
+    // — every case of the enum has at least one matching catch
+    // arm. That parallels how SpaceEngine's switch exhaustiveness
+    // accepts per-case coverage of an enum subject.
+    EnumDecl *altEnum = alt->getEnumOrBoundGenericEnum();
+    llvm::SmallPtrSet<EnumElementDecl *, 8> coveredCases;
+
     for (auto clause : getCatches()) {
       for (auto &LabelItem : clause->getCaseLabelItems()) {
         // Skip refinable patterns with where-clauses.
@@ -517,7 +525,7 @@ bool DoCatchStmt::isSyntacticallyExhaustive() const {
           continue;
         auto *pat = LabelItem.getPattern();
         if (!pat) continue;
-        // Look through binding / paren wrappers down to the IsPattern.
+        // Look through binding / paren wrappers down to the inner pattern.
         const Pattern *cur = pat;
         while (true) {
           if (auto *bp = dyn_cast<BindingPattern>(cur)) {
@@ -536,8 +544,31 @@ bool DoCatchStmt::isSyntacticallyExhaustive() const {
             break;
           }
         }
+        if (altEnum) {
+          if (auto *eep = dyn_cast<EnumElementPattern>(cur)) {
+            if (auto *eed = eep->getElementDecl()) {
+              if (eed->getParentEnum() == altEnum)
+                coveredCases.insert(eed);
+            }
+          }
+        }
       }
       if (found) break;
+    }
+    if (found) continue;
+    // Slice 36: full enum-case coverage substitutes for IsPattern
+    // when the leaf is an enum.
+    if (altEnum) {
+      bool allCovered = true;
+      for (auto *element : altEnum->getAllElements()) {
+        if (!coveredCases.count(element)) {
+          allCovered = false;
+          break;
+        }
+      }
+      if (allCovered && !coveredCases.empty()) {
+        found = true;
+      }
     }
     if (!found) return false;
   }
