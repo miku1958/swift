@@ -4172,6 +4172,16 @@ void SILGenFunction::emitCatchDispatch(DoCatchStmt *S, ManagedValue exn,
       return;
     }
 
+    // Slice 37: emitThrow registers cleanups for any rethrow rewrap
+    // buffers it allocates (e.g. when a typed `throws(A | B)` is being
+    // widened to `any Error` for an outer `throws` context). Those
+    // cleanups are local to the rethrow path; without a scope around
+    // them, they persist on the cleanup stack and slice 35's
+    // subsequently-emitted leaf-success blocks (which run AFTER this
+    // failure handler at the bottom of the cast chain) re-emit
+    // dealloc_stack for them on exit, producing dangling deallocs.
+    Scope rethrowScope(Cleanups, CleanupLocation(location));
+
     // Since we borrowed exn before sending it to our subcases, we know that it
     // must be at +1 at this point. That being said, SILGenPattern will
     // potentially invoke this for each of the catch statements, so we need to
