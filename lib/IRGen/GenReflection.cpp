@@ -292,6 +292,17 @@ getRuntimeVersionThatSupportsDemanglingType(CanType type) {
         return addRequirement(Swift_6_0);
     }
 
+    // Slice 32: narrowed-Any uses the `XN` operator that no shipping
+    // runtime knows how to demangle. Mark any type containing a
+    // narrowed-Any subtree as "newer than any runtime" so getTypeRef
+    // routes through getTypeRefByFunction (a per-module callback that
+    // returns the metadata directly) instead of the static mangled
+    // string. Without this, Mirror reflection, generic substitution
+    // maps, and other lazy-demangle paths abort with "unable to
+    // demangle the type ... 'Si_SSXN'".
+    if (isa<NarrowedAnyType>(t))
+      return addRequirement(Latest);
+
     return false;
   });
 
