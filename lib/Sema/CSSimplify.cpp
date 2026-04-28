@@ -4268,6 +4268,34 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
       }
     }
 
+    // Slice 34: tuple-shaped sources need a disjunction, not the
+    // commit-on-first-success fallback. matchTupleTypes for two
+    // tuples adds element-wise constraints that don't fail until
+    // later (when literal-protocol / binding constraints decide
+    // each element). So `matchTypes(($T0,$T1), (Int,String), Subtype)`
+    // returns success-without-fixes even when ($T0,$T1) actually
+    // wants to be `(String,Int)` — the loop below would commit to
+    // the first leaf and never try the rest.
+    //
+    // For the tuple case generate a real disjunction so the solver
+    // can backtrack between alternatives. The non-matching legs
+    // (e.g. tuple-vs-Bool) fail fast inside matchTypes; the matching
+    // legs (tuple-vs-tuple of matching arity) carry their element
+    // constraints through to literal-default resolution and pick
+    // the right leaf.
+    if (flags.contains(TMF_GenerateConstraints) &&
+        type1->is<TupleType>() && type1->hasTypeVariable() &&
+        layout.getNarrowedAlternatives().size() > 1) {
+      SmallVector<Constraint *, 4> choices;
+      for (auto alt : layout.getNarrowedAlternatives()) {
+        choices.push_back(Constraint::create(
+            *this, ConstraintKind::Subtype, type1, alt,
+            getConstraintLocator(locator)));
+      }
+      addDisjunctionConstraint(choices, locator);
+      return getTypeMatchSuccess();
+    }
+
     // Fallback: try matching type1 against each alternative in turn.
     // A failed trial may have recorded fixes (and corresponding trail
     // entries when solverState is active). Roll those back precisely
