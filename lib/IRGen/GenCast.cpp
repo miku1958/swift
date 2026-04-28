@@ -139,7 +139,24 @@ llvm::Value *irgen::emitCheckedCast(IRGenFunction &IGF,
             break;
           }
         }
-        if (!isLeaf) {
+        // Slice 29 IRGen: when src is a class with a class-hierarchy
+        // relationship to any deep leaf, defer to swift_dynamicCast +
+        // slice 23 post-check. Static "Animal -> V (Dog|Cat)" looks
+        // non-leaf at compile time but is runtime-feasible because
+        // the value's dynamic class might be Dog or Cat.
+        bool hasClassHierarchyMatch = false;
+        if (!isLeaf && peeledSrcEarly->getClassOrBoundGenericClass()) {
+          for (auto leaf : deepLeaves) {
+            if (leaf->getClassOrBoundGenericClass()) {
+              if (peeledSrcEarly->isExactSuperclassOf(leaf) ||
+                  leaf->isExactSuperclassOf(peeledSrcEarly)) {
+                hasClassHierarchyMatch = true;
+                break;
+              }
+            }
+          }
+        }
+        if (!isLeaf && !hasClassHierarchyMatch) {
           // For TakeAlways consumption, swift_dynamicCast would
           // destroy src regardless of result. Since we are
           // short-circuiting that call, we must perform the destroy
@@ -226,6 +243,82 @@ llvm::Value *irgen::emitCheckedCast(IRGenFunction &IGF,
       auto *leafMeta = IGF.emitTypeMetadataRef(leafCanTy);
       auto *eq = IGF.Builder.CreateICmpEQ(dynMeta, leafMeta);
       membership = IGF.Builder.CreateOr(membership, eq);
+    }
+
+    // Slice 29 IRGen: for class leaves the existential's metadata slot
+    // can hold the *static* source type (e.g. Animal) when boxing a
+    // class instance — swift_dynamicCast for `Animal -> Any` doesn't
+    // re-stamp the slot with the dynamic class. The dynamic class is
+    // recoverable from the heap object's first word, which sits at
+    // offset 0 of the Any value buffer for class instances.
+    //
+    // Gate the heap-pointer load on:
+    //   (1) src type is statically a class (so the value buffer holds
+    //        a heap pointer at offset 0, not arbitrary value bits),
+    //   (2) at least one leaf is a class (otherwise no leaf to match
+    //        against the heap-derived metadata),
+    //   (3) `swift_dynamicCast` returned true (otherwise the value
+    //        buffer's contents are undefined),
+    //   (4) the value-type metadata-slot match already failed (no
+    //        need to do extra work when the slot match worked).
+    //
+    // Conditions (3) and (4) gate the heap-pointer load behind a
+    // basic-block branch; condition (1)/(2) gate it at compile time
+    // so non-class src types never emit the heap load.
+    CanType peeledSrcForHeap = srcType;
+    if (auto *ext =
+            dyn_cast<ExistentialType>(peeledSrcForHeap.getPointer()))
+      peeledSrcForHeap =
+          ext->getConstraintType()->getCanonicalType();
+    bool srcIsClass =
+        peeledSrcForHeap->getClassOrBoundGenericClass() != nullptr;
+    bool anyClassLeaf = llvm::any_of(deepLeaves, [](CanType ty) {
+      return ty->getClassOrBoundGenericClass() != nullptr;
+    });
+    if (srcIsClass && anyClassLeaf) {
+      auto *needHeap = IGF.Builder.CreateAnd(
+          result, IGF.Builder.CreateNot(membership));
+      auto *heapBB = IGF.createBasicBlock("narrowed_any_class_leaf.heap");
+      auto *contBB = IGF.createBasicBlock("narrowed_any_class_leaf.cont");
+      auto *priorBB = IGF.Builder.GetInsertBlock();
+      IGF.Builder.CreateCondBr(needHeap, heapBB, contBB);
+
+      IGF.Builder.emitBlock(heapBB);
+      auto *valBufPtr = IGF.Builder.CreateBitCast(
+          dest.getAddress(),
+          IGF.IGM.TypeMetadataPtrTy->getPointerTo());
+      auto *heapObj = IGF.Builder.CreateLoad(valBufPtr,
+                                             IGF.IGM.TypeMetadataPtrTy,
+                                             IGF.IGM.getPointerAlignment());
+      auto *heapMetaSlot = IGF.Builder.CreateBitCast(
+          heapObj, IGF.IGM.TypeMetadataPtrTy->getPointerTo());
+      auto *heapMeta = IGF.Builder.CreateLoad(heapMetaSlot,
+                                              IGF.IGM.TypeMetadataPtrTy,
+                                              IGF.IGM.getPointerAlignment());
+      llvm::Value *heapMatch =
+          llvm::ConstantInt::getFalse(IGF.IGM.getLLVMContext());
+      for (auto leafCanTy : deepLeaves) {
+        if (!leafCanTy->getClassOrBoundGenericClass())
+          continue;
+        auto *leafMeta = IGF.emitTypeMetadataRef(leafCanTy);
+        auto *eq = IGF.Builder.CreateICmpEQ(heapMeta, leafMeta);
+        heapMatch = IGF.Builder.CreateOr(heapMatch, eq);
+      }
+      // Combine the prior membership with heapMatch *inside* heapBB so
+      // the OR dominates the phi's heap-path incoming value. Creating
+      // it in contBB (the default after emitBlock) would place it past
+      // the join, breaking dominance.
+      auto *combinedHeap =
+          IGF.Builder.CreateOr(membership, heapMatch);
+      auto *heapBBExit = IGF.Builder.GetInsertBlock();
+      IGF.Builder.CreateBr(contBB);
+
+      IGF.Builder.emitBlock(contBB);
+      auto *combined = IGF.Builder.CreatePHI(
+          IGF.IGM.Int1Ty, 2, "narrowed_any_membership");
+      combined->addIncoming(membership, priorBB);
+      combined->addIncoming(combinedHeap, heapBBExit);
+      membership = combined;
     }
 
     // Phase 3.F slice 17: when the underlying cast succeeded but
