@@ -4197,6 +4197,22 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
     std::function<bool(Type)> structuralLeaf = [&](Type container) -> bool {
       if (container->getCanonicalType() == canType1)
         return true;
+      // Phase 3.F slice-35-followup: class subtype injection.
+      // `Dog` flowing into `Color | Animal` should match the
+      // Animal leaf via the standard subtype lattice (Dog ≤ Animal).
+      // Without this short-circuit, the fallback's per-alt
+      // matchTypes loop tries the unrelated enum Color leaf first,
+      // and a failed-leaf trial leaves residue that prevents the
+      // Animal alt from cleanly succeeding — salvage then emits
+      // "failed to produce diagnostic". Catching it here returns
+      // success without ever hitting the fallback.
+      if (auto *clsContainer =
+              container->getClassOrBoundGenericClass()) {
+        if (auto *cls1 = canType1->getClassOrBoundGenericClass()) {
+          if (clsContainer->isSuperclassOf(cls1))
+            return true;
+        }
+      }
       Type inner = container;
       if (auto *ext = container->getAs<ExistentialType>())
         inner = ext->getConstraintType();
