@@ -3387,6 +3387,61 @@ bool ContextualFailure::diagnoseCoercionToUnrelatedType() const {
 
   (void)tryFixIts(diag);
 
+  // Phase 3.F slice 27 follow-up: when a `v as any P` coercion fails
+  // and v is a narrowed-Any whose every leaf conforms to P, point
+  // the user at `as!` (the route-2-not-yet-wired escape hatch). Same
+  // hint the standard contextual conversion path emits, but
+  // diagnoseCoercionToUnrelatedType returns true early above
+  // ContextualFailure::diagnoseAsError reaches the regular slice 27
+  // emission point, so we duplicate the check here.
+  Type peeledFrom = fromType;
+  if (auto opt = peeledFrom->getOptionalObjectType())
+    peeledFrom = opt;
+  if (auto *ext = peeledFrom->getAs<ExistentialType>())
+    peeledFrom = ext->getConstraintType();
+  auto *na = peeledFrom->getAs<NarrowedAnyType>();
+
+  Type peeledTo = toType;
+  if (auto opt = peeledTo->getOptionalObjectType())
+    peeledTo = opt;
+  Type toConstraint = peeledTo;
+  if (auto *ext = peeledTo->getAs<ExistentialType>())
+    toConstraint = ext->getConstraintType();
+
+  if (na && toConstraint->isConstraintType() &&
+      peeledTo->isExistentialType()) {
+    auto layout = peeledTo->getExistentialLayout();
+    llvm::SmallVector<ProtocolDecl *, 2> userProtocols;
+    for (auto *proto : layout.getProtocols())
+      if (!proto->isMarkerProtocol())
+        userProtocols.push_back(proto);
+    if (!userProtocols.empty()) {
+      bool allLeavesConformToAll = true;
+      for (auto *proto : userProtocols) {
+        for (Type alt : na->getAlternatives()) {
+          if (!checkConformance(alt, proto)) {
+            allLeavesConformToAll = false;
+            break;
+          }
+        }
+        if (!allLeavesConformToAll)
+          break;
+      }
+      if (allLeavesConformToAll) {
+        Type firstProto = userProtocols.front()->getDeclaredInterfaceType();
+        auto note = emitDiagnostic(
+            diag::narrowed_any_implicit_erase_unsupported,
+            fromType, firstProto);
+        // Fix-it: replace `as` with `as!` (single-character delta).
+        if (coerceExpr->getAsLoc().isValid()) {
+          note.fixItReplace(SourceRange(coerceExpr->getAsLoc(),
+                                        coerceExpr->getAsLoc()),
+                            "as!");
+        }
+      }
+    }
+  }
+
   return true;
 }
 
