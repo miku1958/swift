@@ -4328,6 +4328,30 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
       while (Fixes.size() > fixesBefore)
         Fixes.pop_back();
     }
+
+    // Slice 33: every leaf rejected. During salvage / fix-attempting
+    // mode the diagnostic engine needs a Solution-with-fix anchored
+    // on this constraint to construct the user-facing message;
+    // without one it falls back to "failed to produce diagnostic
+    // for expression". The per-leaf trial loop above unrecords
+    // every fix it attempted (so a real match wouldn't carry
+    // leaf-specific clutter), so on full failure we end up with a
+    // clean failure but no fix for salvage. Record one consolidated
+    // fix here, picking the kind from the locator: AllowArgumentMismatch
+    // for apply-arg-to-param locators (gives "cannot convert value of
+    // type X to expected argument type V") and ContextualMismatch for
+    // everything else.
+    if (shouldAttemptFixes()) {
+      ConstraintLocator *fixLoc = getConstraintLocator(locator);
+      ConstraintFix *fix = nullptr;
+      if (fixLoc->isLastElement<LocatorPathElt::ApplyArgToParam>()) {
+        fix = AllowArgumentMismatch::create(*this, type1, type2, fixLoc);
+      } else {
+        fix = ContextualMismatch::create(*this, type1, type2, fixLoc);
+      }
+      if (!recordFix(fix))
+        return getTypeMatchSuccess();
+    }
     return getTypeMatchFailure(locator);
   }
 
