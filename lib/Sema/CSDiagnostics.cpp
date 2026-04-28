@@ -2972,6 +2972,73 @@ bool ContextualFailure::diagnoseAsError() {
       }
     }
   }
+
+  // Slice 28 hint: literal-default type doesn't fit a narrowed-Any
+  // contextual type because the default isn't in the leaf set, but
+  // some leaf does conform to the literal's protocol. Slice 25
+  // handles the direct case (`let arr: [V] = [..., 2.5]` rebinds
+  // 2.5 to Float when V has a Float leaf) but is gated to non-
+  // Optional contexts to avoid `== nil` ambiguity. For Optional<V> +
+  // literal (`let o: V? = 2.5`), Sema rejects with the bare
+  // "cannot convert Double to V" message — point the user at the
+  // leaf annotation that would unblock them.
+  {
+    auto &ctx = getASTContext();
+    auto isLiteralDefaultType = [&](Type t) -> ProtocolDecl * {
+      if (t->isInt()) {
+        return ctx.getProtocol(KnownProtocolKind::ExpressibleByIntegerLiteral);
+      }
+      if (t->isDouble()) {
+        return ctx.getProtocol(KnownProtocolKind::ExpressibleByFloatLiteral);
+      }
+      if (t->isString()) {
+        return ctx.getProtocol(
+            KnownProtocolKind::ExpressibleByStringLiteral);
+      }
+      return nullptr;
+    };
+
+    Type peeledTo = toType;
+    if (auto opt = peeledTo->getOptionalObjectType())
+      peeledTo = opt;
+    if (auto *ext = peeledTo->getAs<ExistentialType>())
+      peeledTo = ext->getConstraintType();
+
+    if (auto *literalProto = isLiteralDefaultType(fromType)) {
+      if (auto *na = peeledTo->getAs<NarrowedAnyType>()) {
+        // Walk deep leaves so a 3-deep narrowed-Any still surfaces the
+        // right concrete leaf for the suggestion.
+        std::function<void(Type, llvm::SmallVectorImpl<Type> &)>
+            collectDeep = [&](Type ty, llvm::SmallVectorImpl<Type> &out) {
+          Type p = ty;
+          if (auto *e = p->getAs<ExistentialType>())
+            p = e->getConstraintType();
+          if (auto *n = p->getAs<NarrowedAnyType>()) {
+            for (auto a : n->getAlternatives())
+              collectDeep(a, out);
+            return;
+          }
+          out.push_back(ty);
+        };
+        llvm::SmallVector<Type, 4> deepLeaves;
+        collectDeep(Type(na), deepLeaves);
+
+        // The user's value was Sema-rejected, so the literal default
+        // is *not* in the leaf set (else slice 25 would have rebound).
+        // Pick the first leaf that conforms to the literal protocol
+        // and isn't the default itself — that's the natural fix-it.
+        for (Type leaf : deepLeaves) {
+          if (leaf->getCanonicalType() == fromType->getCanonicalType())
+            continue;
+          if (checkConformance(leaf, literalProto)) {
+            emitDiagnostic(diag::narrowed_any_literal_default_not_leaf,
+                           leaf, peeledTo);
+            break;
+          }
+        }
+      }
+    }
+  }
   return true;
 }
 

@@ -2826,6 +2826,10 @@ NOTE(narrowed_any_implicit_erase_unsupported,none,
      "supported in this prototype, use a force-cast (as!) to "
      "dispatch through the runtime",
      (Type, Type))
+NOTE(narrowed_any_literal_default_not_leaf,none,
+     "%0 is a leaf of %1 that supports this literal kind; "
+     "annotate the literal explicitly, e.g. %0(literal)",
+     (Type, Type))
 WARNING(composition_in_extended_type,none,
         "extending a protocol composition is not supported; extending %0 "
         "instead", (Type))
