@@ -1618,81 +1618,95 @@ void PatternMatchEmission::emitSpecializedDispatch(ClauseMatrix &clauses,
       peeled = ext->getConstraintType();
     if (firstSpecializer->getKind() == PatternKind::EnumElement &&
         peeled->is<NarrowedAnyType>()) {
-      auto *eep = cast<EnumElementPattern>(firstSpecializer);
-      auto *eed = eep->getElementDecl();
-      if (!eed)
-        return emitEnumElementDispatch(rowsToSpecialize, arg, handler, failure,
-                                       defaultCaseCount);
-      // The pattern's own type is the narrowed-Any subject (V),
-      // not the enum leaf — walk to the EnumElementDecl's owning
-      // enum to get the actual Color type.
-      CanType srcASTType = arg.getType().getASTType();
-      CanType enumCanType =
-          eed->getParentEnum()->getDeclaredInterfaceType()->getCanonicalType();
-      RegularLocation castLoc(PatternMatchStmt, firstSpecializer, SGF.SGM.M);
-
-      SILType enumValueType = SGF.getLoweredType(enumCanType);
-      SILValue destAddr =
-          SGF.B.createAllocStack(castLoc, enumValueType);
-
-      SILValue srcAddr = arg.getFinalManagedValue().getValue();
-
-      SILBasicBlock *successBB = SGF.createBasicBlock();
-      SILBasicBlock *failureBB = SGF.createBasicBlock();
-
-      SGF.B.createCheckedCastAddrBranch(
-          castLoc, CheckedCastInstOptions(),
-          CastConsumptionKind::CopyOnSuccess,
-          srcAddr, srcASTType,
-          destAddr, enumCanType,
-          successBB, failureBB);
-
-      // Failure: deallocate the dest slot and route to failure.
-      SGF.B.setInsertionPoint(failureBB);
-      SGF.B.createDeallocStack(castLoc, destAddr);
-      failure(castLoc);
-      assert(!SGF.B.hasValidInsertionPoint() && "failure didn't end block");
-
-      // Success: dispatch the enum cases on the leaf-typed dest.
-      SGF.B.setInsertionPoint(successBB);
-      ManagedValue destMV;
-      if (enumValueType.isLoadable(SGF.F)) {
-        // Loadable enum — pick the load qualifier based on the
-        // value's ownership: trivial enums (no-payload like Color)
-        // load with Trivial qualifier and produce None-ownership
-        // values; non-trivial loadable enums use Take.
-        bool isTrivial = enumValueType.isTrivial(SGF.F);
-        SILValue loaded = SGF.B.createLoad(
-            castLoc, destAddr,
-            isTrivial ? LoadOwnershipQualifier::Trivial
-                      : LoadOwnershipQualifier::Take);
-        SGF.B.createDeallocStack(castLoc, destAddr);
-        destMV = isTrivial
-                     ? ManagedValue::forRValueWithoutOwnership(loaded)
-                     : SGF.emitManagedRValueWithCleanup(loaded);
-      } else {
-        // Address-only enum — pass the dest address with a cleanup
-        // to dealloc + destroy.
-        destMV = SGF.emitManagedBufferWithCleanup(destAddr);
-      }
-      // Rewrite each row's pattern type to the enum leaf so
-      // emitEnumElementDispatch's CaseBlocks can derive
-      // enumDecl correctly. The Sema-time type was the narrowed-Any
-      // subject (V); for the cast-target dispatch all the cases
-      // operate on the leaf type.
+      // Partition rowsToSpecialize by the EnumElementPattern's
+      // owning enum. Each group dispatches separately via a
+      // checked_cast_addr_br to its enum leaf; on cast failure
+      // we fall through to the next group, and finally to
+      // outerFailure if no group matched. This handles
+      // narrowed-Any with multiple enum leaves (e.g. Color |
+      // Direction) where rows from different enums share the
+      // same EnumElementPattern column.
+      llvm::SmallMapVector<EnumDecl *,
+                           SmallVector<RowToSpecialize, 4>, 4>
+          groups;
       for (auto &row : rowsToSpecialize) {
         if (auto *eep = dyn_cast<EnumElementPattern>(row.Pattern)) {
-          if (eep->getElementDecl() &&
-              eep->getElementDecl()->getParentEnum() ==
-                  enumCanType->getEnumOrBoundGenericEnum()) {
+          if (auto *eed = eep->getElementDecl())
+            groups[eed->getParentEnum()].push_back(row);
+        }
+      }
+      if (groups.empty())
+        return emitEnumElementDispatch(rowsToSpecialize, arg, handler, failure,
+                                       defaultCaseCount);
+
+      CanType srcASTType = arg.getType().getASTType();
+      RegularLocation castLoc(PatternMatchStmt, firstSpecializer, SGF.SGM.M);
+      SILValue srcAddr = arg.getFinalManagedValue().getValue();
+
+      // Build a chain of cast attempts: try group 1's enum, on
+      // failure try group 2, ..., final failure routes to outer.
+      auto groupsArr = groups.takeVector();
+      auto emitGroup =
+          [&](auto &emitGroupRef, size_t idx, FailureHandler chainFail) -> void {
+        if (idx == groupsArr.size()) {
+          chainFail(castLoc);
+          return;
+        }
+        EnumDecl *enumDecl = groupsArr[idx].first;
+        auto &rows = groupsArr[idx].second;
+        CanType enumCanType =
+            enumDecl->getDeclaredInterfaceType()->getCanonicalType();
+        SILType enumValueType = SGF.getLoweredType(enumCanType);
+        SILValue destAddr = SGF.B.createAllocStack(castLoc, enumValueType);
+
+        SILBasicBlock *successBB = SGF.createBasicBlock();
+        SILBasicBlock *failureBB = SGF.createBasicBlock();
+
+        SGF.B.createCheckedCastAddrBranch(
+            castLoc, CheckedCastInstOptions(),
+            CastConsumptionKind::CopyOnSuccess,
+            srcAddr, srcASTType,
+            destAddr, enumCanType,
+            successBB, failureBB);
+
+        // Failure block of this group: dealloc + recurse to next group.
+        SGF.B.setInsertionPoint(failureBB);
+        SGF.B.createDeallocStack(castLoc, destAddr);
+        emitGroupRef(emitGroupRef, idx + 1, chainFail);
+        assert(!SGF.B.hasValidInsertionPoint() &&
+               "next-group dispatch didn't end block");
+
+        // Success block: prepare the dest as a ManagedValue and
+        // call emitEnumElementDispatch with rows for this group.
+        SGF.B.setInsertionPoint(successBB);
+        ManagedValue destMV;
+        if (enumValueType.isLoadable(SGF.F)) {
+          bool isTrivial = enumValueType.isTrivial(SGF.F);
+          SILValue loaded = SGF.B.createLoad(
+              castLoc, destAddr,
+              isTrivial ? LoadOwnershipQualifier::Trivial
+                        : LoadOwnershipQualifier::Take);
+          SGF.B.createDeallocStack(castLoc, destAddr);
+          destMV = isTrivial
+                       ? ManagedValue::forRValueWithoutOwnership(loaded)
+                       : SGF.emitManagedRValueWithCleanup(loaded);
+        } else {
+          destMV = SGF.emitManagedBufferWithCleanup(destAddr);
+        }
+        // Rewrite each row's pattern type to the enum leaf so
+        // CaseBlocks derives enumDecl correctly.
+        for (auto &row : rows) {
+          if (auto *eep = dyn_cast<EnumElementPattern>(row.Pattern)) {
             const_cast<EnumElementPattern *>(eep)->setType(enumCanType);
           }
         }
-      }
-      emitEnumElementDispatch(rowsToSpecialize,
-                              ConsumableManagedValue::forOwned(destMV),
-                              handler, failure, defaultCaseCount);
-      assert(!SGF.B.hasValidInsertionPoint() && "did not end block");
+        emitEnumElementDispatch(rows,
+                                ConsumableManagedValue::forOwned(destMV),
+                                handler, failure, defaultCaseCount);
+        assert(!SGF.B.hasValidInsertionPoint() &&
+               "group enum dispatch didn't end block");
+      };
+      emitGroup(emitGroup, 0, failure);
       return;
     }
     return emitEnumElementDispatch(rowsToSpecialize, arg, handler, failure,
