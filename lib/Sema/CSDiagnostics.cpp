@@ -710,7 +710,46 @@ bool MissingConformanceFailure::diagnoseAsError() {
 
   // If none of the special cases could be diagnosed,
   // let's fallback to the most general diagnostic.
-  return RequirementFailure::diagnoseAsError();
+  bool emitted = RequirementFailure::diagnoseAsError();
+
+  // Phase 3.F slice 20 follow-up: extend the leaf-missing-conformance
+  // hint to the generic-T-constrained-call path. The base diagnostic
+  // here is "global function 'F' requires that 'T' conform to 'P'"
+  // (type_does_not_conform_decl_owner) which fires on
+  // `passBC(v)` where v: Int|String and BitwiseCopyable is required.
+  // Without this hint, the user gets the generic message and has to
+  // reason from scratch which leaf is the blocker; with it they see
+  // "leaf 'String' does not conform to 'BitwiseCopyable'" directly.
+  if (emitted) {
+    // Walk through opened-existential archetype to the underlying
+    // existential type. For a generic call like `passBC(v)` with
+    // v: Int|String, the constraint solver has opened the archetype
+    // (Self : BitwiseCopyable) on the existential V, so
+    // nonConformingType is the archetype with its original
+    // existential stashed in the GenericEnvironment.
+    Type peeled = nonConformingType;
+    if (auto *arch = peeled->getAs<ExistentialArchetypeType>()) {
+      if (auto *env = arch->getGenericEnvironment()) {
+        if (Type orig = env->getOpenedExistentialType())
+          peeled = orig;
+      }
+    }
+    if (auto *ext = peeled->getAs<ExistentialType>())
+      peeled = ext->getConstraintType();
+    if (auto *na = peeled->getAs<NarrowedAnyType>()) {
+      if (auto *protoType = protocolType->getAs<ProtocolType>()) {
+        auto *protoDecl = protoType->getDecl();
+        for (auto leaf : na->getAlternatives()) {
+          if (!checkConformance(leaf, protoDecl)) {
+            emitDiagnostic(diag::narrowed_any_leaf_missing_conformance,
+                           nonConformingType, leaf, protoDecl->getName());
+            break;
+          }
+        }
+      }
+    }
+  }
+  return emitted;
 }
 
 bool MissingConformanceFailure::diagnoseTypeCannotConform(
