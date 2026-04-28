@@ -2794,6 +2794,28 @@ void PotentialBindings::infer(Constraint *constraint) {
       break;
 
     addPotentialBinding(*binding);
+
+    // Phase 3.F slice 25: when a relational constraint pushes a
+    // narrowed-Any as the upper-bound binding (e.g. literal `2.5`
+    // flowing into `[Int|String|Float]`), the literal-default
+    // machinery only tries the existential itself (which doesn't
+    // conform to ExpressibleByFloatLiteral) and the literal's stdlib
+    // default (Double, which isn't in the closed leaf set). The user
+    // then sees `cannot convert Double to 'X'` even though Float is
+    // a leaf of X. Add a fallback binding for each leaf so the
+    // solver can try `T := Float`/`T := Int`/etc. — leaf injection
+    // then succeeds via the standard narrowed-Any subtyping rule.
+    Type peeled = binding->BindingType;
+    if (auto *ext = peeled->getAs<ExistentialType>())
+      peeled = ext->getConstraintType();
+    if (auto *na = peeled->getAs<NarrowedAnyType>()) {
+      for (auto leaf : na->getAlternatives()) {
+        if (leaf->hasError() || leaf->is<TypeVariableType>())
+          continue;
+        addPotentialBinding(PotentialBinding(
+            leaf, binding->Kind, binding->getSource()));
+      }
+    }
     break;
   }
   case ConstraintKind::KeyPathApplication: {
