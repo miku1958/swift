@@ -1009,19 +1009,45 @@ static bool tryEmitNarrowedAnyDecodableDispatch(
                      {leafSlot, decoderCopy, metaVal},
                      normalBB, errBB);
 
-    // normal: cast outAddr to narrowed-Any existential SIL type,
-    // init_existential_addr it as $L (use the type's conformance
-    // lookup for the conformances list — should be empty for
-    // narrowed-Any since it has Any layout), copy leaf in.
+    // normal: install the leaf value into the outer narrowed-Any
+    // existential at outAddr. Two cases:
+    //
+    //  (a) Leaf is itself a narrowed-Any (nested case, e.g. W = V|Bool
+    //      with V = Int|String): leafSlot is already a valid Any-
+    //      layout existential buffer whose metadata slot reflects the
+    //      *concrete* dynamic leaf written by V's own per-leaf decode
+    //      (e.g. Box.self, String.self). If we wrapped it with
+    //      `init_existential_addr W, type=V, ...` the outer metadata
+    //      slot would be set to V's own metadata (the Any singleton)
+    //      and we'd lose the concrete leaf — which broke `back[i] is V`
+    //      checks after a Codable round-trip. Since narrowed-Any
+    //      reuses the Any-existential layout, `*V` and `*W` describe
+    //      the same memory shape: just reinterpret leafSlot as *W and
+    //      copy the existential bytes through wholesale.
+    //
+    //  (b) Leaf is concrete (Box, String, Bool, …): standard path —
+    //      init_existential_addr writes the leaf type's metadata into
+    //      the outer slot and reserves the inline buffer; copy_addr
+    //      moves the concrete value in.
     SILBuilder normalB(normalBB);
     auto *castedOut = normalB.createUncheckedAddrCast(
         loc, outAddr, narrowedAnySIL);
-    auto conformancesArr = swift::collectExistentialConformances(
-        leafTy, narrowedAnyCan, /*allowMissing=*/false);
-    auto *innerAddr = normalB.createInitExistentialAddr(
-        loc, castedOut, leafTy, silLeafAddrTy, conformancesArr);
-    normalB.createCopyAddr(loc, leafSlot, innerAddr,
-                           IsTake, IsInitialization);
+    Type peeledLeaf = leaves[i];
+    if (auto *ext = peeledLeaf->getAs<ExistentialType>())
+      peeledLeaf = ext->getConstraintType();
+    if (peeledLeaf->is<NarrowedAnyType>()) {
+      auto *castedLeafSlot = normalB.createUncheckedAddrCast(
+          loc, leafSlot, narrowedAnySIL);
+      normalB.createCopyAddr(loc, castedLeafSlot, castedOut,
+                             IsTake, IsInitialization);
+    } else {
+      auto conformancesArr = swift::collectExistentialConformances(
+          leafTy, narrowedAnyCan, /*allowMissing=*/false);
+      auto *innerAddr = normalB.createInitExistentialAddr(
+          loc, castedOut, leafTy, silLeafAddrTy, conformancesArr);
+      normalB.createCopyAddr(loc, leafSlot, innerAddr,
+                             IsTake, IsInitialization);
+    }
     normalB.createDestroyAddr(loc, decoderAddr);
     normalB.createDeallocStack(loc, decoderCopy);
     normalB.createDeallocStack(loc, leafSlot);
