@@ -1,0 +1,85 @@
+// RUN: %target-run-simple-swift
+// REQUIRES: executable_test
+
+// Edge-case parser / AST tests for narrowed `Any`. These exercise
+// shapes called out in todo.md §4 (`main.swift` test bed follow-up) that are
+// observable today even though Sema still desugars to `Any`.
+
+import Foundation
+
+// MARK: 1. Multi-union tuple parameter list
+// todo.md §3.2 / §4 — `((A|B), (C|D)) -> E`. Each tuple element is its
+// own narrowed `Any`; both must parse and inject.
+let twoUnions: ((Int | String), (Bool | Double)) -> String = { lhs, rhs in
+    let l: String
+    if let i = lhs as? Int    { l = "Int(\(i))"    }
+    else if let s = lhs as? String { l = "Str(\(s))" }
+    else { l = "?" }
+    let r: String
+    if let b = rhs as? Bool   { r = "Bool(\(b))"   }
+    else if let d = rhs as? Double { r = "Dbl(\(d))" }
+    else { r = "?" }
+    return "\(l)/\(r)"
+}
+assert(twoUnions(7, true) == "Int(7)/Bool(true)")
+assert(twoUnions("hi", 3.14) == "Str(hi)/Dbl(3.14)")
+
+// MARK: 2. Spelling identity — `A | B` and `B | A` are different types
+// todo.md §4 — `Array<A | B>` vs `Array<B | A>` invariance.
+// Each container has its own spelling. Today they all desugar to
+// `Array<Any>` so values flow freely; the spelling check is a
+// future-state assertion that today's PoC won't enforce.
+let ab: [Int | String] = [1, "two"]
+let ba: [String | Int] = ["two", 1]
+assert(ab.count == 2)
+assert(ba.count == 2)
+assert(ab[0] as? Int == 1)
+assert(ba[0] as? String == "two")
+
+// MARK: 3. Protocol composition inside a leaf — `Int | (P & Q)`
+// todo.md §3.4 / §4 — `(P & Q) | (P & R)` mustn't normalise to
+// `P & (Q | R)`. Today we just verify both shapes parse and round-trip
+// without confusing the parser for `&` precedence.
+let composed: Int | (CustomStringConvertible & CustomDebugStringConvertible) = "composed"
+assert(composed as? String == "composed")
+
+let bothComposed:
+    (CustomStringConvertible & CustomDebugStringConvertible)
+    | (Sequence & IteratorProtocol) = "v"
+assert(bothComposed as? String == "v")
+
+// MARK: 4. Generic argument carrying a union — `Optional<A | B>` and
+// `Result<A | B, Error>`-shaped uses (covered by parser only; no
+// generic specialisation today).
+let optUnion: Optional<Int | String> = .some(42)
+assert(optUnion as? Int == 42)
+
+// MARK: 5. Closure return type with union — pure parser exercise.
+let firstNonEmpty: ([String]) -> String | Bool = { xs in
+    guard let first = xs.first else { return false }
+    return first
+}
+assert(firstNonEmpty([]) as? Bool == false)
+assert(firstNonEmpty(["x"]) as? String == "x")
+
+// MARK: 6. Three-way nesting — `((A | B) | C) | D`. Type identity is
+// the spelling so this is structurally distinct from `A | B | C | D`,
+// but values flow because of leaf injection through Any in the PoC.
+let deeplyNested: ((Int | String) | Bool) | Double = 3.14
+assert(deeplyNested as? Double == 3.14)
+
+// MARK: 7. Source compatibility — `|` in expression context is still
+// the existing bitwise-or operator. todo §4 / Issue 1: a parser that
+// recognises `|` as a type operator must not regress this.
+do {
+    let lhs: UInt8 = 0b1010
+    let rhs: UInt8 = 0b0101
+    let combined = lhs | rhs
+    assert(combined == 0b1111, "expression-position `|` must stay bitwise-or")
+}
+
+// And the cross-context combination: a bitwise-or expression assigned
+// to a narrowed-`Any`-typed binding works because the result is still
+// an Int that can flow through leaf injection.
+let bitwise: Int | String = (0xF0 | 0x0F)
+assert(bitwise as? Int == 0xFF)
