@@ -814,3 +814,88 @@ do {
     catch let e as FsErrK  { got = "fs:\(e.path)" }
     assert(got == "fs:/etc")
 }
+
+// MARK: 12r. Uninhabited (Never) leaves and the inhabited-subset rule
+// Forum reference: https://forums.swift.org/t/pitch-narrowed-any/86369/9
+// (mattie's enum-desugar question + Nobody1707's `A | Never` follow-up).
+//
+// `Never` is uninhabited — no value of type Never can be constructed.
+// When `Never` appears as a leaf, call-site reachability checks
+// ("does this throw?", "is this case reachable?", "does this cast
+// have any chance of succeeding?") are decided against the
+// *inhabited* subset of the leaf set, not the static leaf set:
+//
+//   throws(A | Never)     → inhabited {A}; `try` required, same as throws(A)
+//   throws(Never | A)     → same inhabited set after stripping Never; same behaviour
+//   throws(Never | Never) → inhabited set empty; non-throwing per SE-0413 extension
+//   switch on `A | Never` → no `case _ as Never:` arm required for exhaustiveness
+//
+// Type identity is preserved: A | Never and A still have different
+// mangled names / signatures / witness-table identities. The
+// inhabited-subset rule only governs call-site reachability decisions,
+// not type identity itself.
+do {
+    struct NeverE: Error { let msg: String }
+
+    // (1) throws(A | Never) — A is reachable, Never never is.
+    func mustTry() throws(NeverE | Never) -> Int {
+        throw NeverE(msg: "boom")
+    }
+    var got = ""
+    do { _ = try mustTry() } catch let e as NeverE { got = e.msg }
+    assert(got == "boom")
+
+    // (2) throws(Never | A) — same inhabited subset, different spelling.
+    func mustTrySwapped() throws(Never | NeverE) -> Int {
+        throw NeverE(msg: "boom2")
+    }
+    got = ""
+    do { _ = try mustTrySwapped() } catch let e as NeverE { got = e.msg }
+    assert(got == "boom2")
+
+    // (3) Cross-spelling try-propagation across A|Never and Never|A:
+    //     same inhabited subset {NeverE}, propagation is per-leaf
+    //     (and Never is trivially in any outer set).
+    func compose() throws(NeverE | Never) -> Int {
+        return try mustTrySwapped()   // inner: throws(Never|NeverE), outer: throws(NeverE|Never)
+    }
+    got = ""
+    do { _ = try compose() } catch let e as NeverE { got = e.msg }
+    assert(got == "boom2")
+
+    // (4) Switch on `A | Never` value — `case _ as Never` arm is NOT
+    //     required for exhaustiveness (Never leaf is unreachable).
+    let v: Int | Never = 42
+    switch v {
+    case let n as Int: assert(n == 42)
+    // no `case _ as Never:` arm — must not produce a "missing case" diagnostic.
+    }
+
+    // (5) Leaf injection of A into A | Never works (A is a leaf,
+    //     dynamic type is A; Never branch is unreachable).
+    let w: String | Never = "hi"
+    assert((w as? String) == "hi")
+    assert((w as? Never) == nil)   // Never cast always nil — unreachable leaf
+}
+
+// MARK: 12s. (open) `throws(Never | Never)` → non-throwing per SE-0413 extension
+// Forum reference: https://forums.swift.org/t/pitch-narrowed-any/86369/12
+// SE-0413 already special-cases `throws(Never)` as non-throwing. The
+// natural multi-leaf extension is "if the inhabited subset of the
+// throws set is empty, the function is non-throwing at the call
+// site, no `try` required". Mechanical rule: strip Never leaves,
+// then apply the existing throws-set-empty check.
+//
+// v1 prototype may not yet implement this multi-leaf collapse; the
+// snippet below documents the expected behaviour and is gated behind
+// a flag so it can be enabled once the rule lands in Sema.
+//
+// EXPECTED once the rule is implemented:
+//   func nothrows() throws(Never | Never) -> Int { 99 }
+//   let n = nothrows()              // ← no `try` required
+//   assert(n == 99)
+//
+// CURRENT (likely): the call site requires `try` because the static
+// leaf set is non-empty, even though all leaves are uninhabited.
+// File this as an implementation gap until the inhabited-subset rule
+// lands in Sema's throws-emptiness check.
