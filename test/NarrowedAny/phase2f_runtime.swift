@@ -752,3 +752,65 @@ do {
     }
     assert(describe(1, "a", 2) == "i1,sa,i2")
 }
+
+// MARK: 12q. Cross-spelling try-propagation (forum issue raised by @ksluder)
+// Two libraries each declaring the same leaf set in different spellings
+// should compose at a `try` site without an explicit cast. Spelling-as-
+// identity bites at the function-type-signature boundary (function-value
+// assignment, witness conformance); try-propagation is per-leaf — each
+// possible thrown leaf must fit the outer's declared set, regardless of
+// how the inner side spelled the alternation.
+//
+// Forum: https://forums.swift.org/t/pitch-narrowed-any/86369/5
+// Rule:  proposal §"Generics: where T: A | B" →
+//        "Try-propagation is per-leaf, not per-spelling"
+do {
+    struct NetErrK: Error { let code: Int }
+    struct FsErrK: Error { let path: String }
+
+    // "Library A" picks NetErr | FsErr ordering.
+    func libA(throwingNet: Bool) throws(NetErrK | FsErrK) -> Int {
+        if throwingNet { throw NetErrK(code: 500) }
+        return 1
+    }
+
+    // "Library B" picks the opposite ordering — a different *type* under
+    // spelling-as-identity, same leaf set.
+    func libB(throwingFs: Bool) throws(FsErrK | NetErrK) -> Int {
+        if throwingFs { throw FsErrK(path: "/etc") }
+        return 2
+    }
+
+    // Consumer composes both with whichever spelling — try-propagation
+    // is per-leaf, no cast needed.
+    func compose() throws(NetErrK | FsErrK) -> Int {
+        let a = try libA(throwingNet: false)
+        let b = try libB(throwingFs: false)   // ← cross-spelling propagation
+        return a + b
+    }
+
+    let happy = try compose()
+    assert(happy == 3)
+
+    // libA throwing NetErr — same-spelling propagation through outer.
+    func runA() throws(NetErrK | FsErrK) -> Int {
+        return try libA(throwingNet: true)
+    }
+    var got = ""
+    do { _ = try runA() }
+    catch let e as NetErrK { got = "net:\(e.code)" }
+    catch let e as FsErrK  { got = "fs:\(e.path)" }
+    assert(got == "net:500")
+
+    // libB throwing FsErr — cross-spelling propagation:
+    // inner spelled `FsErr | NetErr`, outer spelled `NetErr | FsErr`,
+    // dynamic value is FsErr → fits outer's set.
+    func runB() throws(NetErrK | FsErrK) -> Int {
+        return try libB(throwingFs: true)
+    }
+    got = ""
+    do { _ = try runB() }
+    catch let e as NetErrK { got = "net:\(e.code)" }
+    catch let e as FsErrK  { got = "fs:\(e.path)" }
+    assert(got == "fs:/etc")
+}
