@@ -312,7 +312,30 @@ static bool isNeverThrownError(Type type) {
   if (!type)
     return true;
 
-  return type->isNever();
+  if (type->isNever())
+    return true;
+
+  // Inhabited-subset rule (proposal §"Uninhabited (Never) leaves and
+  // the inhabited-subset rule"): a narrowed-Any whose every alternative
+  // is `Never` is uninhabited at runtime — no value can flow out — so
+  // it counts as non-throwing for call-site reachability checks. This
+  // is the multi-leaf extension of SE-0413's `throws(Never)` rule.
+  // Type identity is preserved (the rule lives in this call-site
+  // classifier, not in canonicalisation): `Never | Never` and `Never`
+  // still have distinct mangled names / signatures / witness-table
+  // identities.
+  Type inner = type;
+  if (auto *ext = type->getAs<ExistentialType>())
+    inner = ext->getConstraintType();
+  if (auto *na = inner->getAs<NarrowedAnyType>()) {
+    for (Type alt : na->getAlternatives()) {
+      if (!alt->isNever())
+        return false;
+    }
+    return true;
+  }
+
+  return false;
 }
 
 namespace {

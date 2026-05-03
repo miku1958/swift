@@ -878,7 +878,7 @@ do {
     assert((w as? Never) == nil)   // Never cast always nil — unreachable leaf
 }
 
-// MARK: 12s. (open) `throws(Never | Never)` → non-throwing per SE-0413 extension
+// MARK: 12s. `throws(Never | Never)` → non-throwing per SE-0413 extension
 // Forum reference: https://forums.swift.org/t/pitch-narrowed-any/86369/12
 // SE-0413 already special-cases `throws(Never)` as non-throwing. The
 // natural multi-leaf extension is "if the inhabited subset of the
@@ -886,16 +886,17 @@ do {
 // site, no `try` required". Mechanical rule: strip Never leaves,
 // then apply the existing throws-set-empty check.
 //
-// v1 prototype may not yet implement this multi-leaf collapse; the
-// snippet below documents the expected behaviour and is gated behind
-// a flag so it can be enabled once the rule lands in Sema.
-//
-// EXPECTED once the rule is implemented:
-//   func nothrows() throws(Never | Never) -> Int { 99 }
-//   let n = nothrows()              // ← no `try` required
-//   assert(n == 99)
-//
-// CURRENT (likely): the call site requires `try` because the static
-// leaf set is non-empty, even though all leaves are uninhabited.
-// File this as an implementation gap until the inhabited-subset rule
-// lands in Sema's throws-emptiness check.
+// Type identity is preserved: `Never | Never` and `Never` still have
+// distinct mangled names / signatures / witness-table identities.
+// The rule lives in TypeCheckEffects' call-site classifier
+// (`isNeverThrownError`), not in canonicalisation.
+do {
+    func nothrows() throws(Never | Never) -> Int { 99 }
+    let n = nothrows()              // ← no `try` required
+    assert(n == 99)
+
+    // Verify the same call inside a non-throwing function compiles —
+    // the call site is genuinely non-throwing, not just "try-able".
+    func wrap() -> Int { return nothrows() }
+    assert(wrap() == 99)
+}
