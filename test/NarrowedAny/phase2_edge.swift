@@ -83,3 +83,27 @@ do {
 // an Int that can flow through leaf injection.
 let bitwise: Int | String = (0xF0 | 0x0F)
 assert(bitwise as? Int == 0xFF)
+
+// MARK: 8. Generic extension argument matching — same-spelling works,
+// cross-spelling and leaf-injection are diagnosed (not crashed). This
+// is the regression for a Sema ICE in `matchDeepEqualityTypes` that
+// used to fire `castTo<BoundGenericType>` on a NarrowedAnyType when
+// `[Int | String]` met `[String | Int]` at extension-method lookup
+// (the function had no NarrowedAnyType branch and fell through to the
+// bound-generic `castTo` at the bottom). Spelling-as-identity still
+// applies at type-identity boundaries: extension dispatch is
+// per-spelling, not per-leaf-set.
+extension Array where Element == String | Int {
+    func extSummary() -> Int { return self.count }
+}
+do {
+    let ys: [String | Int] = ["a", 7, "b"]
+    assert(ys.extSummary() == 3)        // same spelling → matches the extension
+    // The following lines each diagnose cleanly today (cross-spelling
+    // requires `as`, leaf-injection at the extension boundary is not
+    // implemented in v1) — the prototype no longer ICEs in either:
+    //   let zs: [Int | String] = [1, "a"]
+    //   _ = zs.extSummary()             // error: cross-spelling, requires `as`
+    //   let xs: [String]       = ["a"]
+    //   _ = xs.extSummary()             // error: leaf-injection at ext not impl
+}

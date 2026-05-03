@@ -3986,6 +3986,28 @@ ConstraintSystem::matchDeepEqualityTypes(Type type1, Type type2,
     return getTypeMatchSuccess();
   }
 
+  // Narrowed-Any types are matched element-wise under Bind: deep equality
+  // here is type-identity (generic argument matching), so spelling matters
+  // (per §"Spelling is identity") — same leaf set in a different order
+  // is *not* the same type. Without this branch, the function would fall
+  // through to the BoundGenericType castTo at the bottom and fire an
+  // unrelated cast assertion (matchExistentialTypes already covers the
+  // value-flow per-leaf membership case via matchTypes).
+  if (auto *na1 = type1->getAs<NarrowedAnyType>()) {
+    auto *na2 = type2->castTo<NarrowedAnyType>();
+    auto alts1 = na1->getAlternatives();
+    auto alts2 = na2->getAlternatives();
+    if (alts1.size() != alts2.size())
+      return getTypeMatchFailure(locator);
+    for (unsigned i = 0, e = alts1.size(); i < e; ++i) {
+      auto result = matchTypes(alts1[i], alts2[i],
+                               ConstraintKind::Bind, subflags, locator);
+      if (result.isFailure())
+        return result;
+    }
+    return getTypeMatchSuccess();
+  }
+
   // Handle nominal types that are not directly generic.
   if (auto nominal1 = type1->getAs<NominalType>()) {
     auto nominal2 = type2->castTo<NominalType>();
