@@ -2995,26 +2995,29 @@ bool ContextualFailure::diagnoseAsError() {
         llvm::SmallPtrSet<TypeBase *, 8> srcDeep, tgtDeep;
         collectDeep(Type(naFrom), srcDeep);
         collectDeep(Type(naTo), tgtDeep);
-        bool everyFitsTarget = true;
+        unsigned overlap = 0;
         for (auto *sLeaf : srcDeep) {
           auto sCanon = Type(sLeaf)->getCanonicalType();
-          bool found = false;
           for (auto *tLeaf : tgtDeep) {
             if (Type(tLeaf)->getCanonicalType()->isEqual(sCanon)) {
-              found = true;
+              ++overlap;
               break;
             }
           }
-          if (!found) {
-            everyFitsTarget = false;
-            break;
-          }
         }
         auto srcRange = getSourceRange();
-        if (everyFitsTarget && srcRange.isValid()) {
+        // Per the proposal's fix-it table: subset → ` as T2`,
+        // partial overlap → ` as? T2` (primary; user may need to
+        // adjust the binding to Optional). Disjoint stays no-fix-it
+        // (the diagnostic's leaves note already lists the available
+        // alternatives so the user can fix the *target*). The
+        // existing `tryFixIts` legacy path attaches ` as! T2` as
+        // a secondary suggestion in both subset and partial-overlap
+        // cases.
+        if (srcRange.isValid() && overlap > 0) {
           llvm::SmallString<48> fixIt;
           llvm::raw_svector_ostream fixItOS(fixIt);
-          fixItOS << " as ";
+          fixItOS << (overlap == srcDeep.size() ? " as " : " as? ");
           Type printTo = toType;
           if (auto opt = printTo->getOptionalObjectType())
             printTo = opt;

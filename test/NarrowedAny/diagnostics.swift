@@ -93,13 +93,23 @@ extension Int | String {    // expected-error {{non-nominal type 'Int | String' 
     func leafProbe() -> Int { return 0 }
 }
 
-// §10. Implicit cross-shape conversion — error + fix-it that
-// inserts ` as <toType-spelling>` after the source expression
-// (proposal §"Diagnostic and fix-it for implicit cross-shape").
-// Sema also attaches the legacy ` as! T` fix-it from
-// `missing_explicit_conversion`'s general path; both are emitted
-// and verify-mode locks both in.
+// §10. Implicit cross-shape conversion — error + fix-it.
+// Per the proposal's fix-it table, subset → ` as T2`, partial
+// overlap → ` as? T2` (primary). The existing legacy
+// `missing_explicit_conversion` path attaches ` as! T2` as a
+// secondary suggestion in both cases. Verify-mode locks the full
+// fix-it set in.
 do {
+    // Subset: every source leaf is in target's set. Different
+    // spelling, so it's a cross-shape conversion. Fix-it primary
+    // ` as T2`; secondary ` as! T2` from the legacy path.
     let a: Int | String = 7
     let _: String | Int = a    // expected-error {{cannot convert value of type 'Int | String' to specified type 'String | Int'}} {{28-28= as! String | Int}} {{28-28= as String | Int}}
+}
+do {
+    // Partial overlap: Int is shared, Double-only-in-source.
+    // Fix-it primary ` as? T2` (user may need to make binding
+    // Optional); secondary ` as! T2` from the legacy path.
+    let a: Int | Double = 7
+    let _: String | Int = a    // expected-error {{cannot convert value of type 'Int | Double' to specified type 'String | Int'}} {{28-28= as! String | Int}} {{28-28= as? String | Int}}
 }
