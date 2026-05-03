@@ -1447,14 +1447,15 @@ Pattern *TypeChecker::coercePatternToType(
       // always true" diagnostic already covers them with cleaner
       // wording, mirroring the slice-18 same-type dedup in CSApply.
       Type peeledFrom = type;
-      if (auto opt = peeledFrom->getOptionalObjectType())
-        peeledFrom = opt;
       if (auto *ext = peeledFrom->getAs<ExistentialType>())
         peeledFrom = ext->getConstraintType();
       if (auto *na = peeledFrom->getAs<NarrowedAnyType>()) {
+        // Don't peel Optional from `IP->getCastType()` — that's the
+        // user-written cast target (e.g. `Int?` in `case let _ as
+        // Int?`), peeling it would turn `Int?` into `Int` and
+        // false-positive a `V = Int? | String` leaf check. Same fix
+        // as CSApply's warnIfNarrowedAnyCastIsProvablyEmpty.
         Type peeledTo = IP->getCastType();
-        if (auto opt = peeledTo->getOptionalObjectType())
-          peeledTo = opt;
         if (auto *ext = peeledTo->getAs<ExistentialType>())
           peeledTo = ext->getConstraintType();
 

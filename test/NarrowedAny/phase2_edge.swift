@@ -107,3 +107,45 @@ do {
     //   let xs: [String]       = ["a"]
     //   _ = xs.extSummary()             // error: leaf-injection at ext not impl
 }
+
+// MARK: 9. Slice-18 leaf-membership false-positive regressions.
+// audit pass #2 surfaced three pre-existing slice-18 bugs when the
+// disjoint-cast warning flipped to a hard error. Each got fixed in
+// the same commit (swift fork 0279a8953d7); the runnable shapes
+// below lock the fixes in so they don't regress.
+do {
+    // (a) `Int?` is a real leaf of `Int? | String` and the
+    // partial-overlap `as?` should compile cleanly. Slice 18
+    // originally peeled an Optional off `toType` and then compared
+    // canonical-type pointers, so `as? Int?` ended up looking up
+    // `Int` against a leaf set that only contained `Optional<Int>`
+    // — false-positive disjoint. Fix: don't peel `toType`; switch
+    // to `Type::isEqual` membership.
+    let opt1: Int? | String = 42
+    assert((opt1 as? Int?) == .some(.some(42)))
+    let opt2: Int? | String = "hi"
+    assert((opt2 as? Int?) == nil)
+
+    // (b) Protocol-composition leaf: `Int | (P & Q)` against a
+    // concrete target that conforms to `P & Q` is feasible at
+    // runtime. Slice 18 treated existential leaves as opaque and
+    // false-positived `as? String` as disjoint. Fix: decompose via
+    // ExistentialLayout, check conformance per member protocol.
+    let mixed: Int | (CustomStringConvertible & CustomDebugStringConvertible) = "mixed"
+    assert((mixed as? String) == "mixed")
+    let mixedI: Int | (CustomStringConvertible & CustomDebugStringConvertible) = 7
+    assert((mixedI as? String) == nil)
+    assert((mixedI as? Int) == 7)
+
+    // (c) Pattern-form mirror — `case let _ as Int?` on a switch
+    // over `Int? | String` was the same false positive in
+    // TypeCheckPattern's IsPattern path. Same canonical-equality
+    // + protocol-composition fixes apply.
+    let v: Int? | String = nil as Int?
+    switch v {
+    case let i as Int?:
+        assert(i == nil, "Int? leaf matched, value is Optional<Int>.none")
+    case let s as String:
+        assert(false, "String arm should not fire, got \(s)")
+    }
+}
