@@ -4255,22 +4255,45 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
     // Per-leaf flow at the throws boundary: spelling-as-identity
     // applies to function-type signatures, but try-site / throw-site
     // propagation is a value-flow check — the runtime thrown value
-    // is one concrete leaf, so what matters is that every leaf of
-    // the inner throws set has a home in the outer's declared set,
-    // regardless of how either side spelled the alternation. The
-    // proposal's §"Try-propagation is per-leaf, not per-spelling"
-    // formalises this; SE-0413's `throws(SpecificError) → throws(any
-    // Error)` is the same posture, just generalised from
-    // "subtype of any Error" to "leaf-set subset".
+    // is one concrete leaf, so what matters is that every inhabited
+    // leaf of the inner throws set has a home in the outer's
+    // declared set, regardless of how either side spelled the
+    // alternation. `Never` leaves are uninhabited and trivially fit
+    // any outer set (inhabited-subset rule). The proposal's
+    // §"Try-propagation is per-leaf, not per-spelling" +
+    // §"Uninhabited (Never) leaves" formalise this; SE-0413's
+    // `throws(SpecificError) → throws(any Error)` is the same
+    // posture, just generalised from "subtype of any Error" to
+    // "leaf-set subset modulo Never".
+    //
+    // The constraint reaches this call from two anchor shapes:
+    // (a) function-type thrown-error matching — locator ends with
+    //     LocatorPathElt::ThrownErrorType (matchFunctionThrowing's
+    //     Dependent fallthrough), and
+    // (b) `try f()` rewrap — TypeCheckEffects::checkThrownErrorType
+    //     starts a fresh typeCheckExpression with CTP_ThrowStmt as
+    //     the contextual purpose; locator ends with
+    //     LocatorPathElt::ContextualType(CTP_ThrowStmt).
     bool isThrownErrorContext =
         locator.endsWith<LocatorPathElt::ThrownErrorType>();
-    if (isExplicitCoerce || isThrownErrorContext) {
+    bool isThrowContextual = false;
+    if (auto last = locator.last()) {
+      if (auto ct = last->getAs<LocatorPathElt::ContextualType>()) {
+        isThrowContextual = ct->getPurpose() == CTP_ThrowStmt;
+      }
+    }
+    if (isExplicitCoerce || isThrownErrorContext || isThrowContextual) {
       Type type1Inner = type1;
       if (auto *ext = type1->getAs<ExistentialType>())
         type1Inner = ext->getConstraintType();
       if (auto *na1 = type1Inner->getAs<NarrowedAnyType>()) {
         bool everyAltIsLeaf = true;
         for (Type alt1 : na1->getAlternatives()) {
+          // Inhabited-subset rule: Never leaves are unreachable, no
+          // value can be constructed, so they trivially fit any
+          // outer set — skip them from the leaf-membership check.
+          if (alt1->isNever())
+            continue;
           bool found = false;
           auto canAlt1 = alt1->getCanonicalType();
           for (Type alt2 : layout.getNarrowedAlternatives()) {

@@ -1755,28 +1755,49 @@ void SILGenFunction::emitThrow(SILLocation loc, ManagedValue exnMV,
   // perform the conversion.
   // FIXME: Can the AST tell us what to do here?
   if (exnType != destErrorType) {
-    assert(destErrorType == SILType::getExceptionType(getASTContext()));
-
-    ProtocolConformanceRef conformances[1] = {
-      checkConformance(
-        exn->getType().getASTType(), getASTContext().getErrorDecl())
+    // Per-leaf flow at the throws boundary (proposal §"Try-propagation
+    // is per-leaf, not per-spelling"): when both types are narrowed-Any,
+    // Sema accepts cross-spelling propagation by leaf-set subset rather
+    // than spelling identity. The two types share the Any-singleton
+    // metadata layout (slice 6/9), so a SIL-level unchecked cast
+    // suffices — the bytes don't move.
+    auto unwrapNarrowedAny = [](SILType t) -> NarrowedAnyType * {
+      Type ast = t.getASTType();
+      if (auto *ext = ast->getAs<ExistentialType>())
+        ast = ext->getConstraintType();
+      return ast->getAs<NarrowedAnyType>();
     };
+    if (unwrapNarrowedAny(exnType) && unwrapNarrowedAny(destErrorType)) {
+      if (exn->getType().isAddress()) {
+        exn = B.createUncheckedAddrCast(
+            loc, exn, destErrorType.getAddressType());
+      } else {
+        exn = B.createUncheckedBitwiseCast(loc, exn, destErrorType);
+      }
+    } else {
+      assert(destErrorType == SILType::getExceptionType(getASTContext()));
 
-    exn = emitExistentialErasure(
-        loc,
-        exnType.getASTType(),
-        getTypeLowering(exnType),
-        getTypeLowering(destErrorType),
-        getASTContext().AllocateCopy(conformances),
-        SGFContext(),
-        [&](SGFContext C) -> ManagedValue {
-          if (exn->getType().isAddress()) {
-            return emitLoad(loc, exn, getTypeLowering(exnType), SGFContext(),
-                            IsTake);
-          }
+      ProtocolConformanceRef conformances[1] = {
+        checkConformance(
+          exn->getType().getASTType(), getASTContext().getErrorDecl())
+      };
 
-          return ManagedValue::forForwardedRValue(*this, exn);
-        }).forward(*this);
+      exn = emitExistentialErasure(
+          loc,
+          exnType.getASTType(),
+          getTypeLowering(exnType),
+          getTypeLowering(destErrorType),
+          getASTContext().AllocateCopy(conformances),
+          SGFContext(),
+          [&](SGFContext C) -> ManagedValue {
+            if (exn->getType().isAddress()) {
+              return emitLoad(loc, exn, getTypeLowering(exnType), SGFContext(),
+                              IsTake);
+            }
+
+            return ManagedValue::forForwardedRValue(*this, exn);
+          }).forward(*this);
+    }
   }
   assert(exn->getType().getObjectType() == destErrorType);
 

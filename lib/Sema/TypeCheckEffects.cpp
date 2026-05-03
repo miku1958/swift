@@ -5328,6 +5328,48 @@ swift::compareThrownErrorsForSubtyping(
       subThrownErrorKind == ThrownErrorClassification::Dependent)
     return ThrownErrorSubtyping::Dependent;
 
+  // Per-leaf flow at the throws boundary (proposal §"Try-propagation
+  // is per-leaf, not per-spelling" + §"Uninhabited (Never) leaves and
+  // the inhabited-subset rule"): at try-/throw-site propagation,
+  // spelling-as-identity (which still applies at the function-type
+  // signature level — assignment of function values, witness
+  // conformance, mangling) gives way to value-flow checking. The
+  // dynamic thrown value is one concrete leaf; what matters is that
+  // every inhabited leaf of the inner thrown set has a home in the
+  // outer's leaf set. Never leaves are unreachable so they trivially
+  // fit. Same posture as SE-0413's `throws(SpecificError) → throws(any
+  // Error)` widening, generalised from "subtype of any Error" to
+  // "leaf-set subset modulo Never".
+  auto narrowedLeavesStripNever =
+      [](Type t) -> std::optional<SmallVector<CanType, 4>> {
+    Type inner = t;
+    if (auto *ext = t->getAs<ExistentialType>())
+      inner = ext->getConstraintType();
+    auto *na = inner->getAs<NarrowedAnyType>();
+    if (!na)
+      return std::nullopt;
+    SmallVector<CanType, 4> leaves;
+    for (Type alt : na->getAlternatives()) {
+      if (alt->isNever())
+        continue;
+      leaves.push_back(alt->getCanonicalType());
+    }
+    return leaves;
+  };
+  if (auto subLeaves = narrowedLeavesStripNever(subThrownError)) {
+    if (auto superLeaves = narrowedLeavesStripNever(superThrownError)) {
+      bool allFound = true;
+      for (CanType s : *subLeaves) {
+        bool found = false;
+        for (CanType o : *superLeaves)
+          if (s == o) { found = true; break; }
+        if (!found) { allFound = false; break; }
+      }
+      if (allFound)
+        return ThrownErrorSubtyping::Subtype;
+    }
+  }
+
   // Check whether the subtype's thrown error type is convertible to the
   // supertype's thrown error type.
   if (TypeChecker::isConvertibleTo(subThrownError, superThrownError, dc))

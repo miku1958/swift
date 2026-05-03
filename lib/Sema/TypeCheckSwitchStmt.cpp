@@ -1077,6 +1077,26 @@ namespace {
       }
 
       Space totalSpace = Space::forType(subjectType, Identifier());
+      // Inhabited-subset rule (proposal §"Uninhabited (Never) leaves"):
+      // when a narrowed-Any subject's inhabited leaf set (with all
+      // Never alternatives stripped) collapses to a single leaf, treat
+      // exhaustiveness as if the subject were that single leaf — so
+      // `switch v: Int | Never { case let n as Int: }` is exhaustive
+      // without a `case _ as Never:` arm. When the inhabited set is
+      // empty, the subject is uninhabited and the switch is trivially
+      // exhaustive.
+      if (auto *na = Space::getNarrowedAny(subjectType)) {
+        SmallVector<Type, 2> inhabited;
+        for (Type alt : na->getAlternatives())
+          if (!alt->isNever())
+            inhabited.push_back(alt);
+        if (inhabited.size() != na->getAlternatives().size()) {
+          if (inhabited.empty())
+            return;
+          if (inhabited.size() == 1)
+            totalSpace = Space::forType(inhabited.front(), Identifier());
+        }
+      }
       Space coveredSpace = Space::forDisjunct(spaces);
 
       unsigned minusCount
@@ -1408,6 +1428,12 @@ namespace {
         }
         if (auto *na = Space::getNarrowedAny(subjectType)) {
           for (auto leaf : na->getAlternatives()) {
+            // Inhabited-subset rule: skip Never leaves when computing
+            // whether the slice-30 hint is needed. A `Never` leaf with
+            // no covering arm isn't a "missing case" — it's
+            // unreachable.
+            if (leaf->isNever())
+              continue;
             auto canLeaf = leaf->getCanonicalType().getPointer();
             if (!coveredLeavesEarly.count(canLeaf)) {
               slice30HasLeafNotes = true;
@@ -1480,6 +1506,11 @@ namespace {
       if (subjectIsNarrowedAny && slice30HasLeafNotes) {
         auto *na = Space::getNarrowedAny(subjectType);
         for (auto leaf : na->getAlternatives()) {
+          // Inhabited-subset rule: never emit `add missing case
+          // '_ as Never'` — a Never leaf is unreachable, omitting an
+          // arm for it is correct.
+          if (leaf->isNever())
+            continue;
           auto canLeaf = leaf->getCanonicalType().getPointer();
           if (coveredLeavesEarly.count(canLeaf))
             continue;
