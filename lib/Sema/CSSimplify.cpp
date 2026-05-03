@@ -4252,7 +4252,19 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
       if (auto *expr = anchor.dyn_cast<Expr *>())
         isExplicitCoerce = isa<CoerceExpr>(expr);
     }
-    if (isExplicitCoerce) {
+    // Per-leaf flow at the throws boundary: spelling-as-identity
+    // applies to function-type signatures, but try-site / throw-site
+    // propagation is a value-flow check — the runtime thrown value
+    // is one concrete leaf, so what matters is that every leaf of
+    // the inner throws set has a home in the outer's declared set,
+    // regardless of how either side spelled the alternation. The
+    // proposal's §"Try-propagation is per-leaf, not per-spelling"
+    // formalises this; SE-0413's `throws(SpecificError) → throws(any
+    // Error)` is the same posture, just generalised from
+    // "subtype of any Error" to "leaf-set subset".
+    bool isThrownErrorContext =
+        locator.endsWith<LocatorPathElt::ThrownErrorType>();
+    if (isExplicitCoerce || isThrownErrorContext) {
       Type type1Inner = type1;
       if (auto *ext = type1->getAs<ExistentialType>())
         type1Inner = ext->getConstraintType();

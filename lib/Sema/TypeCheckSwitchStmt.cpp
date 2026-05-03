@@ -876,8 +876,17 @@ namespace {
           // and the switch is exhaustive without a `default`. Same shape
           // as enum-case exhaustiveness, just over types instead of
           // case names.
-          for (Type alt : narrowed->getAlternatives())
+          //
+          // Per the proposal's §"Uninhabited (Never) leaves and the
+          // inhabited-subset rule": `Never` leaves are skipped from the
+          // exhaustiveness disjunct because no value of type `Never`
+          // can be constructed — `case _ as Never:` would be
+          // unreachable, so omitting it is not a "missing case".
+          for (Type alt : narrowed->getAlternatives()) {
+            if (alt->isNever())
+              continue;
             arr.push_back(Space::forType(alt, Identifier()));
+          }
         } else if (auto *TTy = tp->castTo<TupleType>()) {
           // Decompose each of the elements into its component type space.
           SmallVector<Space, 4> constElemSpaces;
