@@ -113,3 +113,23 @@ do {
     let a: Int | Double = 7
     let _: String | Int = a    // expected-error {{cannot convert value of type 'Int | Double' to specified type 'String | Int'}} {{28-28= as! String | Int}} {{28-28= as? String | Int}}
 }
+
+// §11. Issue 9 `&` mixing — narrowed-Any cannot appear on either
+// side of `&`. Decision row #13: `(A | B) & P`, `(A | B) & C`, and
+// `(A | B) & (C | D)` are all rejected directly (no normalisation,
+// per Spelling-as-identity). Falls under Swift's stock
+// "non-protocol, non-class type cannot be used within a protocol-
+// constrained type" diagnostic; no narrowed-Any-specific wording.
+protocol P11 {}
+class C11 {}
+typealias T11a = (Int | String) & P11        // expected-error {{non-protocol, non-class type 'Int | String' cannot be used within a protocol-constrained type}}
+typealias T11b = (Int | String) & C11        // expected-error {{non-protocol, non-class type 'Int | String' cannot be used within a protocol-constrained type}}
+typealias T11c = (Int | String) & (Int | String)  // expected-error {{non-protocol, non-class type 'Int | String' cannot be used within a protocol-constrained type}} expected-error {{non-protocol, non-class type 'Int | String' cannot be used within a protocol-constrained type}}
+
+// §12. Multi-clause `where T: A | B, T: C | D` — rejected.
+// Decision row #13: a single narrowed-Any constraint per type
+// parameter; the type-checker sees the second clause as a
+// conflicting same-type requirement (slice-3.C lowers
+// `where T: A | B` to `where T == A | B`).
+func f12<T>(_ x: T) where T: Int | String, T: Int | Bool {}
+                              // expected-error@-1 {{no type for 'T' can satisfy both}}
