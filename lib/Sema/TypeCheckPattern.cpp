@@ -22,6 +22,8 @@
 #include "swift/Basic/StringExtras.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/ASTVisitor.h"
+#include "swift/AST/ConformanceLookup.h"
+#include "swift/AST/ExistentialLayout.h"
 #include "swift/AST/SourceFile.h"
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/ParameterList.h"
@@ -1477,15 +1479,25 @@ Pattern *TypeChecker::coercePatternToType(
         bool emit = false;
         bool emitWidening = false;
         if (peeledTo->is<NarrowedAnyType>()) {
-          // Both sides narrowed-Any: warn on disjoint OR widening using
-          // *deep* leaf sets so nested alternatives flatten.
+          // Both sides narrowed-Any: error on disjoint OR warn on
+          // widening using *deep* leaf sets so nested alternatives
+          // flatten. Use canonical-type equality (not pointer
+          // equality) to avoid false positives on BoundGeneric /
+          // sugared leaves like `Int?` that don't share TypeBase
+          // pointers across parse positions.
           llvm::SmallPtrSet<TypeBase *, 8> srcDeep, tgtDeep;
           collectDeep(peeledFrom, srcDeep);
           collectDeep(peeledTo, tgtDeep);
           unsigned overlap = 0;
-          for (auto *leaf : srcDeep)
-            if (tgtDeep.count(leaf))
-              ++overlap;
+          for (auto *sLeaf : srcDeep) {
+            auto sCanon = Type(sLeaf)->getCanonicalType();
+            for (auto *tLeaf : tgtDeep) {
+              if (Type(tLeaf)->getCanonicalType()->isEqual(sCanon)) {
+                ++overlap;
+                break;
+              }
+            }
+          }
           if (overlap == 0)
             emit = true;            // disjoint
           else if (overlap == srcDeep.size())
@@ -1494,9 +1506,40 @@ Pattern *TypeChecker::coercePatternToType(
         } else if (!peeledTo->isExistentialType() && !peeledTo->hasArchetype()) {
           llvm::SmallPtrSet<TypeBase *, 8> srcDeep;
           collectDeep(peeledFrom, srcDeep);
-          bool isLeaf =
-              srcDeep.count(peeledTo->getCanonicalType().getPointer()) != 0;
+          // Canonical-type equality membership (not pointer equality)
+          // — same reason as above.
+          bool isLeaf = false;
+          auto peeledToCanon = peeledTo->getCanonicalType();
+          for (auto *deepLeaf : srcDeep) {
+            if (Type(deepLeaf)->getCanonicalType()->isEqual(peeledToCanon)) {
+              isLeaf = true;
+              break;
+            }
+          }
           emit = !isLeaf;
+          // Protocol-composition leaf: a pattern arm `case let x as
+          // String` against `V = Int | (P & Q)` should match when the
+          // dynamic value is a String conforming to `P & Q`. Mirror
+          // of CSApply's branch.
+          if (emit) {
+            for (auto *deepLeaf : srcDeep) {
+              Type leafTy(deepLeaf);
+              if (leafTy->isExistentialType()) {
+                ExistentialLayout layout = leafTy->getExistentialLayout();
+                bool conformsAll = true;
+                for (auto *proto : layout.getProtocols()) {
+                  if (checkConformance(peeledTo, proto).isInvalid()) {
+                    conformsAll = false;
+                    break;
+                  }
+                }
+                if (conformsAll && !layout.getProtocols().empty()) {
+                  emit = false;
+                  break;
+                }
+              }
+            }
+          }
           // Slice 29: skip when peeledTo is a class with a superclass
           // relationship to any leaf (either direction). Without this
           // a `case let x as Animal` arm against `V = Dog | Cat` would
@@ -1514,10 +1557,12 @@ Pattern *TypeChecker::coercePatternToType(
         }
 
         if (emit) {
-          // diagSelect = 0 ("case _ as T" behaves like `as?` —
-          // arm matches none of the values when T isn't a leaf).
-          diags.diagnose(IP->getLoc(), diag::narrowed_any_cast_nonleaf,
-                         type, IP->getCastType(), 0);
+          // `case _ as T` behaves like `as?` — per row #18 disjoint
+          // pattern matches are hard errors (the closed leaf set
+          // makes the arm provably dead). Same flip as the expr
+          // path in CSApply::warnIfNarrowedAnyCastIsProvablyEmpty.
+          diags.diagnose(IP->getLoc(), diag::narrowed_any_cast_disjoint,
+                         type, IP->getCastType());
           llvm::SmallString<128> leafBuf;
           llvm::raw_svector_ostream leafOS(leafBuf);
           llvm::interleaveComma(na->getAlternatives(), leafOS,

@@ -1508,16 +1508,22 @@ WARNING(is_expr_same_type,none,
         "'!= nil'?", (Type, Type))
 WARNING(downcast_to_unrelated,none,
         "cast from %0 to unrelated type %1 always fails", (Type, Type))
-WARNING(narrowed_any_cast_nonleaf,none,
-        "%select{cast|cast|'is' check}2 from %0 to %1 always "
-        "%select{returns nil|fails|evaluates to false}2 because %1 is "
-        "not in the closed leaf set of %0",
-        (Type, Type, unsigned))
-WARNING(narrowed_any_cast_nonleaf_to,none,
-        "%select{cast|cast|'is' check}2 from %0 to %1 always "
-        "%select{returns nil|fails|evaluates to false}2 because %0 is "
-        "not in the closed leaf set of %1",
-        (Type, Type, unsigned))
+ERROR(narrowed_any_cast_disjoint,none,
+      "cast from %0 to %1 cannot succeed because %1 is not in the "
+      "closed leaf set of %0",
+      (Type, Type))
+ERROR(narrowed_any_cast_disjoint_to,none,
+      "cast from %0 to %1 cannot succeed because %0 is not in the "
+      "closed leaf set of %1",
+      (Type, Type))
+WARNING(narrowed_any_is_nonleaf,none,
+        "'is' check from %0 to %1 always evaluates to false because "
+        "%1 is not in the closed leaf set of %0",
+        (Type, Type))
+WARNING(narrowed_any_is_nonleaf_to,none,
+        "'is' check from %0 to %1 always evaluates to false because "
+        "%0 is not in the closed leaf set of %1",
+        (Type, Type))
 NOTE(narrowed_any_cast_nonleaf_leaves,none,
      "valid leaves of %0 are: %1", (Type, StringRef))
 WARNING(narrowed_any_cast_widening_always_succeeds,none,

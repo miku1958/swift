@@ -14,7 +14,10 @@ do {
     let v1: Int | String = 42
     assert(v1 as? Int == 42)
     assert(v1 as? String == nil)
-    assert((v1 as? Bool) == nil)
+    // assert((v1 as? Bool) == nil)
+    // ⛔ Bool is disjoint from Int|String's leaf set — per decision
+    // row #18 this is a hard compile error in any of as / as? / as!.
+    // The runtime would return nil; Sema rejects the form upfront.
 
     let v2: Int | String = "hello"
     assert(v2 as? Int == nil)

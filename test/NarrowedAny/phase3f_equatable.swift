@@ -385,13 +385,12 @@ do {
     var allocs: [Int] = []
     func track(_ n: Int) { allocs.append(n) }
 
-    do {
-        let w = W(1, track)
-        let v: (Int | String)? = w as? (Int | String)
-        assert(v == nil, "Witness is not a leaf of Int|String")
-    }
-    assert(allocs == [1, -1], "non-leaf concrete take_always must release source")
-
+    // The direct `w as? (Int | String)` form is now a hard compile
+    // error per decision row #18 (disjoint cast — Witness is not a
+    // leaf of Int|String). The slice-17 ref-count integrity story
+    // is now exercised through the generic path only, which still
+    // routes through the runtime's leaf-membership post-check
+    // (Sema can't statically prove disjointness for a generic T).
     allocs.removeAll()
     func tryCast<T>(_ x: T) -> (Int | String)? {
         return x as? (Int | String)
@@ -443,63 +442,58 @@ do {
     assert(us.count == 3, "compactMap drops the two Bool elements")
 }
 
-// MARK: 13.8. Sema warning + runtime-correct behaviour for non-leaf cast (slice 18)
+// MARK: 13.8. Hard error for disjoint `as?` / `as!`; warning for `is`
+// (decision row #18, lifted 2026-05-03 from slice-18's original warning
+// posture). The closed leaf set makes "no type in common" a static
+// fact, not a runtime question, so `v as? T` / `v as! T` against a
+// concrete T with no overlap with V's leaves are rejected at compile
+// time. `v is T` keeps the warning posture, matching Swift's existing
+// convention for statically-false `is` expressions.
 //
-// `v as? T` / `v as! T` / `v is T` where v is a narrowed-Any value
-// and T is concrete-not-in-the-leaf-set now warn at compile time
-// (since the result is statically a constant: nil / trap / false).
-// Runtime behaviour is preserved: `as?` returns nil, `is` returns
-// false. (`as!` would trap, so we don't exercise that here.)
+// The disjoint cases below would be compile errors and are gated out
+// of the runnable test bed. The `is` form stays warning + runtime
+// false. (Pattern-form disjoint cast in §13.9 is also commented out
+// for the same reason.)
 do {
     typealias V = Int | String
     let v: V = 42
-    // The next two lines emit a Sema warning each, which is the
-    // behaviour we want to lock in. The runtime semantics still
-    // match the warning's "always nil / always false" claim.
-    let b: Bool? = v as? Bool
-    let isB: Bool = v is Bool
-    assert(b == nil, "Bool cast statically and dynamically nil")
+    // let b:   Bool? = v as? Bool   // ⛔ error: Bool is not in V's leaf set
+    // let f:   Bool  = v as! Bool   // ⛔ error: same disjoint check
+    let isB: Bool = v is Bool         // ⚠ warning, runtime false
     assert(!isB, "Bool is-check statically and dynamically false")
 }
 
-// MARK: 13.9. Pattern-cast warning + behaviour (slice 18 follow-up)
+// MARK: 13.9. Pattern-cast against a non-leaf type (decision row #18)
 //
-// `case let _ as T` and `if let x = e as? T` patterns hit a different
-// type-checker path (TypeCheckPattern) than the bare `as?` / `as!` /
-// `is` exprs that slice 18 hooked. The follow-up adds the same
-// warning to the pattern path; runtime semantics are unchanged
-// (the matching arm is skipped / the binding doesn't fire).
+// `case let _ as T` against a narrowed-Any subject is the pattern-form
+// twin of §13.8's `as?`. After row #18, a disjoint pattern arm is a
+// compile error (the arm is provably dead). The disjoint pattern is
+// gated out of the runnable test bed; the in-leaf arms still
+// exercise the matching machinery.
 do {
     typealias V = Int | String
     var hits = 0
-    var fellThrough = false
     let v: V = "yo"
     switch v {
     case let i as Int: hits += i
     case let s as String: hits += s.count
-    case let b as Bool: hits += b ? 100 : -100  // warns, never matches
-    default: fellThrough = true
+    // case let b as Bool: hits += b ? 100 : -100  // ⛔ error: dead arm
     }
     assert(hits == 2, "string \"yo\" matched the String arm")
-    assert(!fellThrough, "Bool arm did not absorb the value")
 
-    // if-let pattern path — same expr-based warning as §13.8
-    if let _ = v as? Bool {
-        assert(false, "Bool if-let must not bind")
-    }
+    // if-let pattern with disjoint target is also an error now:
+    //   if let _ = v as? Bool { … }                // ⛔ error
 }
 
-// MARK: 13.10. Direction-B warning: concrete non-leaf source → narrowed-Any
-// (slice 18 polish — symmetric with §13.8). Slice 17's IRGen short-circuit
-// makes the runtime answer correct (`as?` returns nil); slice 18's
-// Direction-B Sema warning surfaces the leaf-set mismatch at compile time.
+// MARK: 13.10. Direction-B disjoint cast: concrete non-leaf → narrowed-Any
+// (decision row #18 mirror). Same flip — `as?`/`as!` is now a hard
+// error, leaving slice 17's IRGen short-circuit as defence-in-depth
+// for non-source paths.
 do {
     typealias V = Int | String
-    let b = true
-    // Compile-time: warns "Bool is not in the closed leaf set of V"
-    // Runtime: short-circuits to nil via slice 17's pre-call check.
-    let r: V? = b as? V
-    assert(r == nil, "Bool source → V target is statically + dynamically nil")
+    _ = V.self                         // silence unused-typealias
+    // let b = true
+    // let r: V? = b as? V             // ⛔ error: Bool is not in V's leaf set
 }
 
 // MARK: 13.105. Widening narrowed-Any cast always-succeeds (slice 18 widening-check)
@@ -555,20 +549,18 @@ do {
            "V → W widening preserves value")
 }
 
-// MARK: 13.11. Disjoint narrowed-Any cast (slice 18 disjoint-check)
+// MARK: 13.11. Disjoint narrowed-Any → narrowed-Any cast (decision row #18)
 //
-// `v as? W` where v : V, both V and W are narrowed-Any with disjoint
-// leaf sets — pre-slice-18 stayed silent because Sema treated both
-// ends as opaque existentials. Now Sema computes the intersection
-// of leaf sets and warns when empty.
+// `v as? W` where v: V and V/W are narrowed-Any with disjoint leaf
+// sets. Per row #18 this is a hard error — gated out of the runnable
+// test bed. Slice 17's runtime post-check still defends against any
+// path that bypasses Sema (specialisation / generic widening / etc.)
 do {
     typealias V = Int | String
     typealias W = Bool | Float
-    let v: V = 42
-    // Compile-time: warns. Runtime: Int isn't in {Bool, Float} so
-    // slice 17's leaf-membership post-check makes this nil.
-    let w: W? = v as? W
-    assert(w == nil, "disjoint narrowed-Any cast statically + dynamically nil")
+    _ = (V.self, W.self)
+    // let v: V = 42
+    // let w: W? = v as? W              // ⛔ error: leaf sets disjoint
 }
 
 // §13.12 — Codable round-trip preserves nested-narrowed-Any membership

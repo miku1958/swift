@@ -4188,15 +4188,22 @@ namespace {
       if (fromType->getCanonicalType() == toType->getCanonicalType())
         return;
 
+      // toType is the cast target as written (e.g. `Int?` in
+      // `v as? Int?`), not the cast expression's wrapping Optional
+      // result. Peeling Optional off toType would incorrectly turn
+      // `Int?` into `Int`, then false-positive a `V = Int? | String`
+      // leaf-membership check because the alternative `Int?` doesn't
+      // canonicalise to `Int`. Don't peel toType.
+      //
+      // fromType peel is also redundant: a value of type `Int?` on
+      // the source side stays `Int?`; if it were narrowed-Any-typed,
+      // peeling Optional once wouldn't change that. Keep the peel
+      // off fromType too so behaviour stays symmetric.
       Type peeledFrom = fromType;
-      if (auto opt = peeledFrom->getOptionalObjectType())
-        peeledFrom = opt;
       if (auto *ext = peeledFrom->getAs<ExistentialType>())
         peeledFrom = ext->getConstraintType();
 
       Type peeledTo = toType;
-      if (auto opt = peeledTo->getOptionalObjectType())
-        peeledTo = opt;
       auto *toExt = peeledTo->getAs<ExistentialType>();
       if (toExt)
         peeledTo = toExt->getConstraintType();
@@ -4215,15 +4222,39 @@ namespace {
             llvm::SmallPtrSet<TypeBase *, 8> srcDeep, tgtDeep;
             collectDeepLeaves(peeledFrom, srcDeep);
             collectDeepLeaves(peeledTo, tgtDeep);
+            // Use canonical-type equality across the two sets (rather
+            // than pointer equality) — same reason as the concrete-
+            // target branch below: BoundGeneric / sugared leaves like
+            // `Int?` can be uniqued differently at parse time even
+            // though their canonical forms are identical.
             unsigned overlap = 0;
-            for (auto *leaf : srcDeep)
-              if (tgtDeep.count(leaf))
-                ++overlap;
+            for (auto *sLeaf : srcDeep) {
+              auto sCanon = Type(sLeaf)->getCanonicalType();
+              for (auto *tLeaf : tgtDeep) {
+                if (Type(tLeaf)->getCanonicalType()->isEqual(sCanon)) {
+                  ++overlap;
+                  break;
+                }
+              }
+            }
             if (overlap == 0) {
-              // Disjoint — statically empty.
-              ctx.Diags.diagnose(expr->getLoc(),
-                                 diag::narrowed_any_cast_nonleaf,
-                                 fromType, toType, diagSelect);
+              // Disjoint — statically empty. Per todo.md decision row
+              // #18 (proposal §"Examples — compile errors"), `as?`/
+              // `as!` against a disjoint narrowed-Any are hard errors,
+              // not warnings — the closed leaf set makes "no type in
+              // common" a static fact, not a runtime question.
+              // `is` keeps the warning posture consistent with Swift's
+              // existing treatment of statically-false `is` (the value
+              // is still a well-typed boolean false).
+              if (diagSelect == 2) {
+                ctx.Diags.diagnose(expr->getLoc(),
+                                   diag::narrowed_any_is_nonleaf,
+                                   fromType, toType);
+              } else {
+                ctx.Diags.diagnose(expr->getLoc(),
+                                   diag::narrowed_any_cast_disjoint,
+                                   fromType, toType);
+              }
               llvm::SmallString<128> leafBuf;
               llvm::raw_svector_ostream leafOS(leafBuf);
               llvm::interleaveComma(na->getAlternatives(), leafOS,
@@ -4258,11 +4289,40 @@ namespace {
         // Concrete target — check membership in src's deep leaf set so
         // a leaf reachable through a nested narrowed-Any alternative
         // (e.g. Int via V in W = V|Bool) doesn't false-positive as
-        // disjoint.
+        // disjoint. Use canonical-type equality rather than uniqued
+        // TypeBase pointer comparison: BoundGeneric leaves (e.g.
+        // `Int?` = `Optional<Int>`) can be parsed at the alternative
+        // and the cast site without sharing a TypeBase pointer, so a
+        // pointer-only check would false-positive even when the
+        // canonical forms match exactly.
         llvm::SmallPtrSet<TypeBase *, 8> srcDeep;
         collectDeepLeaves(peeledFrom, srcDeep);
-        if (srcDeep.count(peeledTo->getCanonicalType().getPointer()))
-          return;
+        auto peeledToCanon = peeledTo->getCanonicalType();
+        for (auto *deepLeaf : srcDeep) {
+          if (Type(deepLeaf)->getCanonicalType()->isEqual(peeledToCanon))
+            return;
+        }
+        // Protocol-composition leaf: `Int | (P & Q)` with target
+        // `String` is feasible if `String` conforms to `P & Q` —
+        // closed-leaf-set says the runtime value is one of {Int, P&Q},
+        // and a String value is exactly the kind of thing that lives
+        // inside the `P & Q` existential when bridged. The slice-18
+        // pointer-only check missed this and flagged the cast disjoint.
+        for (auto *deepLeaf : srcDeep) {
+          Type leafTy(deepLeaf);
+          if (leafTy->isExistentialType()) {
+            ExistentialLayout layout = leafTy->getExistentialLayout();
+            bool conformsAll = true;
+            for (auto *proto : layout.getProtocols()) {
+              if (checkConformance(peeledTo, proto).isInvalid()) {
+                conformsAll = false;
+                break;
+              }
+            }
+            if (conformsAll && !layout.getProtocols().empty())
+              return;
+          }
+        }
         // Slice 29: class-hierarchy cast. If peeledTo is a class and
         // any deep leaf has a superclass relationship with it in
         // either direction, the cast is potentially feasible — don't
@@ -4282,8 +4342,16 @@ namespace {
               return;
           }
         }
-        ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_cast_nonleaf,
-                           fromType, toType, diagSelect);
+        // Per row #18: disjoint `as?`/`as!` is a hard error (closed
+        // leaf set makes "no type in common" a static fact). `is`
+        // stays a warning, matching Swift's convention for `is`.
+        if (diagSelect == 2) {
+          ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_is_nonleaf,
+                             fromType, toType);
+        } else {
+          ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_cast_disjoint,
+                             fromType, toType);
+        }
         llvm::SmallString<128> leafBuf;
         llvm::raw_svector_ostream leafOS(leafBuf);
         llvm::interleaveComma(na->getAlternatives(), leafOS,
@@ -4306,11 +4374,33 @@ namespace {
           return;
         // Same deep-leaf check as Direction A's concrete branch — a
         // concrete src may match a leaf nested inside one of the
-        // target's alternatives.
+        // target's alternatives. Use canonical-type equality (not
+        // pointer equality) for the same reason as Direction A.
         llvm::SmallPtrSet<TypeBase *, 8> tgtDeep;
         collectDeepLeaves(peeledTo, tgtDeep);
-        if (tgtDeep.count(peeledFrom->getCanonicalType().getPointer()))
-          return;
+        auto peeledFromCanon = peeledFrom->getCanonicalType();
+        for (auto *deepLeaf : tgtDeep) {
+          if (Type(deepLeaf)->getCanonicalType()->isEqual(peeledFromCanon))
+            return;
+        }
+        // Protocol-composition leaf in target: `Bool → Int | (P & Q)`
+        // is feasible if `Bool` conforms to `P & Q`. Mirror of the
+        // concrete-target branch in Direction A.
+        for (auto *deepLeaf : tgtDeep) {
+          Type leafTy(deepLeaf);
+          if (leafTy->isExistentialType()) {
+            ExistentialLayout layout = leafTy->getExistentialLayout();
+            bool conformsAll = true;
+            for (auto *proto : layout.getProtocols()) {
+              if (checkConformance(peeledFrom, proto).isInvalid()) {
+                conformsAll = false;
+                break;
+              }
+            }
+            if (conformsAll && !layout.getProtocols().empty())
+              return;
+          }
+        }
         // Slice 29 mirror: class-hierarchy cast in Direction B.
         // `let a: Animal = Dog(); let v: V? = a as? V` (V = Dog|Cat)
         // is feasible because the runtime can downcast Animal to Dog
@@ -4325,8 +4415,16 @@ namespace {
               return;  // Upcast: leaf is a superclass of source.
           }
         }
-        ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_cast_nonleaf_to,
-                           fromType, toType, diagSelect);
+        // Direction-B mirror of row #18: disjoint as?/as! is an error,
+        // is is a warning.
+        if (diagSelect == 2) {
+          ctx.Diags.diagnose(expr->getLoc(), diag::narrowed_any_is_nonleaf_to,
+                             fromType, toType);
+        } else {
+          ctx.Diags.diagnose(expr->getLoc(),
+                             diag::narrowed_any_cast_disjoint_to,
+                             fromType, toType);
+        }
         llvm::SmallString<128> leafBuf;
         llvm::raw_svector_ostream leafOS(leafBuf);
         llvm::interleaveComma(na->getAlternatives(), leafOS,
