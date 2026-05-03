@@ -99,10 +99,20 @@ extension Array where Element == String | Int {
 do {
     let ys: [String | Int] = ["a", 7, "b"]
     assert(ys.extSummary() == 3)        // same spelling → matches the extension
+
+    // Cross-spelling reshape via explicit `as` works end-to-end.
+    // `Array<Int|String>` and `Array<String|Int>` share bit-identical
+    // memory layout (each element is narrowed-Any reusing Any
+    // singleton metadata), so the cast is a SIL-level type relabel
+    // — no element walk, no buffer reallocation.
+    let zs: [Int | String] = [1, "a"]
+    assert((zs as [String | Int]).extSummary() == 2)        // inline reshape
+    let reshaped = zs as [String | Int]
+    assert(reshaped.extSummary() == 2)                      // named-binding reshape
+
     // The following lines each diagnose cleanly today (cross-spelling
     // requires `as`, leaf-injection at the extension boundary is not
     // implemented in v1) — the prototype no longer ICEs in either:
-    //   let zs: [Int | String] = [1, "a"]
     //   _ = zs.extSummary()             // error: cross-spelling, requires `as`
     //   let xs: [String]       = ["a"]
     //   _ = xs.extSummary()             // error: leaf-injection at ext not impl
