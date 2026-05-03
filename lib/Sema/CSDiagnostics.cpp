@@ -2958,6 +2958,75 @@ bool ContextualFailure::diagnoseAsError() {
 
   (void)tryFixIts(diag);
 
+  // Cross-shape narrowed-Any → narrowed-Any reshape fix-it
+  // (proposal §"Diagnostic and fix-it for implicit cross-shape").
+  // When source and target are both narrowed-Any and every source
+  // leaf has a home in the target's leaf set (subset, modulo
+  // spelling), the implicit conversion is rejected per
+  // §"Spelling is identity" — but the user can fix it with one
+  // explicit `as` cast. Insert the fix-it directly on the source
+  // range so the diagnostic is actionable.
+  {
+    auto peelNarrowed = [](Type t) -> NarrowedAnyType * {
+      Type inner = t;
+      if (auto opt = inner->getOptionalObjectType())
+        inner = opt;
+      if (auto *ext = inner->getAs<ExistentialType>())
+        inner = ext->getConstraintType();
+      return inner->getAs<NarrowedAnyType>();
+    };
+    if (auto *naFrom = peelNarrowed(fromType)) {
+      if (auto *naTo = peelNarrowed(toType)) {
+        // Walk deep leaves on each side so nested narrowed-Any
+        // alternatives flatten correctly.
+        std::function<void(Type, llvm::SmallPtrSetImpl<TypeBase *> &)>
+            collectDeep = [&](Type ty,
+                              llvm::SmallPtrSetImpl<TypeBase *> &out) {
+          Type p = ty;
+          if (auto *e = p->getAs<ExistentialType>())
+            p = e->getConstraintType();
+          if (auto *n = p->getAs<NarrowedAnyType>()) {
+            for (auto a : n->getAlternatives())
+              collectDeep(a, out);
+            return;
+          }
+          out.insert(ty->getCanonicalType().getPointer());
+        };
+        llvm::SmallPtrSet<TypeBase *, 8> srcDeep, tgtDeep;
+        collectDeep(Type(naFrom), srcDeep);
+        collectDeep(Type(naTo), tgtDeep);
+        bool everyFitsTarget = true;
+        for (auto *sLeaf : srcDeep) {
+          auto sCanon = Type(sLeaf)->getCanonicalType();
+          bool found = false;
+          for (auto *tLeaf : tgtDeep) {
+            if (Type(tLeaf)->getCanonicalType()->isEqual(sCanon)) {
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            everyFitsTarget = false;
+            break;
+          }
+        }
+        auto srcRange = getSourceRange();
+        if (everyFitsTarget && srcRange.isValid()) {
+          llvm::SmallString<48> fixIt;
+          llvm::raw_svector_ostream fixItOS(fixIt);
+          fixItOS << " as ";
+          Type printTo = toType;
+          if (auto opt = printTo->getOptionalObjectType())
+            printTo = opt;
+          if (auto *ext = printTo->getAs<ExistentialType>())
+            printTo = ext->getConstraintType();
+          printTo->print(fixItOS);
+          diag.fixItInsertAfter(srcRange.End, fixIt.str());
+        }
+      }
+    }
+  }
+
   // Slice 27 hint (assignment-context form): when every leaf of a
   // narrowed-Any source conforms to every protocol in the target
   // existential, point the user at `as!` (the route-2 escape hatch)

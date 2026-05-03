@@ -92,3 +92,14 @@ extension Int | String {    // expected-error {{non-nominal type 'Int | String' 
                             // expected-note@-1 {{narrowed-Any types are existentials with a closed leaf set}}
     func leafProbe() -> Int { return 0 }
 }
+
+// §10. Implicit cross-shape conversion — error + fix-it that
+// inserts ` as <toType-spelling>` after the source expression
+// (proposal §"Diagnostic and fix-it for implicit cross-shape").
+// Sema also attaches the legacy ` as! T` fix-it from
+// `missing_explicit_conversion`'s general path; both are emitted
+// and verify-mode locks both in.
+do {
+    let a: Int | String = 7
+    let _: String | Int = a    // expected-error {{cannot convert value of type 'Int | String' to specified type 'String | Int'}} {{28-28= as! String | Int}} {{28-28= as String | Int}}
+}
