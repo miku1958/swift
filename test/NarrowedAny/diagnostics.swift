@@ -78,13 +78,38 @@ do {
     }
 }
 
-// §8. Cross-spelling extension dispatch — per-spelling rule.
-extension Array where Element == String | Int { // expected-note {{where}}
+// §8. Cross-spelling and leaf-injection extension dispatch —
+// per-spelling rule. v1 ships explicit-cast for both axes
+// (proposal §"Containers and extensions"):
+//
+// - Leaf-injection (§8b below) goes through SameTypeRequirementFailure
+//   and gets an auto-fix-it that wraps the receiver in `(receiver as
+//   [Element])`. The cast is an O(N) per-element wrap at runtime.
+//
+// - Cross-spelling (§8a below) currently goes through a different
+//   diagnostic path (per-alternative comparison surfacing as "any X"
+//   and "any Y" mismatch) which doesn't carry narrowed-`Any` context;
+//   the fix-it for that axis is a separate diagnostic-quality
+//   improvement, not blocked on v1 review (cross-spelling reshape
+//   itself works end-to-end via explicit `as`, runtime-free relabel).
+//
+// The implicit-lift form for both axes is the deferred follow-up
+// (proposal §"Future directions § Per-element leaf injection at the
+// extension boundary").
+extension Array where Element == String | Int { // expected-note 2 {{where}}
     func extProbe() -> Int { return self.count }
 }
 do {
+    // §8a. Cross-spelling: same leaf set, different spelling.
+    // Diagnostic surfaces as per-alternative type mismatch
+    // (no fix-it attached today; explicit reshape required).
     let zs: [Int | String] = [1, "a"]
     _ = zs.extProbe()       // expected-error {{requires the types}}
+
+    // §8b. Leaf injection: leaf-typed receiver. Fix-it inserts
+    // `(xs as [String | Int])` — O(N) per-element wrap at runtime.
+    let xs: [Int] = [1, 2, 3]
+    _ = xs.extProbe()       // expected-error {{requires the types}} {{9-9=(}} {{11-11= as [String | Int])}}
 }
 
 // §9. `extension Int | String { }` — narrowed-Any is not nominal.

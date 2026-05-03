@@ -508,15 +508,171 @@ bool RequirementFailure::diagnoseAsError() {
     return true;
   }
 
+  // Per-element leaf injection at the extension boundary —
+  // v1 ships explicit-cast + auto-fix-it. When a same-type
+  // requirement `where Element == Int | String` fails because the
+  // substituted lhs is a leaf of the expected narrowed-`Any` (e.g.
+  // `xs: [Int]` reaching `extension Array where Element ==
+  // Int | String`), or because the substituted lhs is a different
+  // spelling of the same narrowed-`Any` (`xs: [String | Int]`
+  // reaching the same extension), attach a fix-it that wraps the
+  // receiver in `(receiver as <expectedContainer>)`. The cast
+  // walks element-wise wrapping each leaf as `Any`-singleton —
+  // O(N) for leaf injection, runtime-free relabel for cross-
+  // spelling. The implicit form is the deferred follow-up; see
+  // proposal § "Future directions § Per-element leaf injection at
+  // the extension boundary".
+  auto computeLeafInjectionFixIt =
+      [&](SourceLoc &startLocOut, SourceLoc &endLocOut,
+          llvm::SmallString<64> &suffixOut) -> bool {
+    if (getRequirement().getKind() != RequirementKind::SameType)
+      return false;
+    auto stripExistential = [](Type t) -> Type {
+      if (auto *e = t->getAs<ExistentialType>())
+        return e->getConstraintType();
+      return t;
+    };
+    Type lhsInner = stripExistential(lhs);
+    Type rhsInner = stripExistential(rhs);
+    auto *naLhs = lhsInner->getAs<NarrowedAnyType>();
+    auto *naRhs = rhsInner->getAs<NarrowedAnyType>();
+    bool applies = false;
+    Type expected;
+    if (naRhs && naLhs) {
+      // Cross-spelling: both sides are narrowed-`Any`; reshape via
+      // `as <rhs>` is a runtime-free relabel.
+      applies = true;
+      expected = rhs;
+    } else if (naRhs) {
+      // Leaf injection on lhs side.
+      auto canLhs = lhsInner->getCanonicalType();
+      std::function<bool(NarrowedAnyType *)> contains =
+          [&](NarrowedAnyType *na) -> bool {
+        for (auto alt : na->getAlternatives()) {
+          if (alt->getCanonicalType() == canLhs)
+            return true;
+          Type altInner = stripExistential(alt);
+          if (auto *innerNa = altInner->getAs<NarrowedAnyType>())
+            if (contains(innerNa))
+              return true;
+        }
+        return false;
+      };
+      if (contains(naRhs)) {
+        applies = true;
+        expected = rhs;
+      }
+    } else if (naLhs) {
+      // Symmetric: required lhs is narrowed-`Any`, actual rhs is
+      // a leaf. Less common at extension dispatch but possible.
+      auto canRhs = rhsInner->getCanonicalType();
+      std::function<bool(NarrowedAnyType *)> contains =
+          [&](NarrowedAnyType *na) -> bool {
+        for (auto alt : na->getAlternatives()) {
+          if (alt->getCanonicalType() == canRhs)
+            return true;
+          Type altInner = stripExistential(alt);
+          if (auto *innerNa = altInner->getAs<NarrowedAnyType>())
+            if (contains(innerNa))
+              return true;
+        }
+        return false;
+      };
+      if (contains(naLhs)) {
+        applies = true;
+        expected = lhs;
+      }
+    }
+    if (!applies)
+      return false;
+    // Walk anchor to find the receiver. The anchor for an
+    // extension-method call is typically the CallExpr or the
+    // member-ref node before resolution.
+    auto findReceiver = [](ASTNode rawAnchor) -> Expr * {
+      auto *anchorExpr = getAsExpr(rawAnchor);
+      if (!anchorExpr)
+        return nullptr;
+      if (auto *call = dyn_cast<CallExpr>(anchorExpr))
+        anchorExpr = call->getFn();
+      if (auto *UDE = dyn_cast<UnresolvedDotExpr>(anchorExpr))
+        return UDE->getBase();
+      if (auto *MRE = dyn_cast<MemberRefExpr>(anchorExpr))
+        return MRE->getBase();
+      if (auto *SE = dyn_cast<SubscriptExpr>(anchorExpr))
+        return SE->getBase();
+      if (auto *DSCE = dyn_cast<DotSyntaxCallExpr>(anchorExpr))
+        return DSCE->getBase();
+      return nullptr;
+    };
+    auto *recv = findReceiver(getRawAnchor());
+    if (!recv)
+      return false;
+    auto range = recv->getSourceRange();
+    if (!range.isValid())
+      return false;
+    // The expected container type as the user would spell it.
+    // For `extension Array where Element == X | Y`, the receiver
+    // would be cast to `[X | Y]`. We compute the receiver-side
+    // container type by substituting the expected element back
+    // into the actual receiver's bound generic shell.
+    Type recvType = getType(recv);
+    if (!recvType)
+      return false;
+    Type containerType;
+    if (auto *bound = recvType->getAs<BoundGenericType>()) {
+      // Replace the mismatched generic argument with the expected
+      // one; leave others alone.
+      llvm::SmallVector<Type, 4> newArgs(bound->getGenericArgs().begin(),
+                                          bound->getGenericArgs().end());
+      // Best-effort: replace any argument that equals the actual
+      // mismatch lhs with the expected. In single-arg containers
+      // (Array, Set, Optional) this is unambiguous.
+      for (auto &arg : newArgs) {
+        if (arg->getCanonicalType() == lhsInner->getCanonicalType()) {
+          arg = expected;
+          break;
+        }
+      }
+      containerType = BoundGenericType::get(bound->getDecl(),
+                                             bound->getParent(), newArgs);
+    } else {
+      containerType = expected;
+    }
+    suffixOut.clear();
+    llvm::raw_svector_ostream OS(suffixOut);
+    OS << " as ";
+    PrintOptions sugarOpts;
+    sugarOpts.SynthesizeSugarOnTypes = true;
+    containerType.print(OS, sugarOpts);
+    OS << ")";
+    startLocOut = range.Start;
+    endLocOut = range.End;
+    return true;
+  };
+
+  SourceLoc fixItStart, fixItEnd;
+  llvm::SmallString<64> fixItSuffix;
+  bool emitFixIt =
+      computeLeafInjectionFixIt(fixItStart, fixItEnd, fixItSuffix);
+
   if (reqDC->isTypeContext() && genericCtx != reqDC &&
       (genericCtx->isChildContextOf(reqDC) ||
        isStaticOrInstanceMember(AffectedDecl))) {
     auto *NTD = reqDC->getSelfNominalTypeDecl();
-    emitDiagnostic(
-        getDiagnosticInRereference(), AffectedDecl, NTD->getDeclaredType(),
-        lhs, rhs);
+    auto diagnostic =
+        emitDiagnostic(getDiagnosticInRereference(), AffectedDecl,
+                       NTD->getDeclaredType(), lhs, rhs);
+    if (emitFixIt) {
+      diagnostic.fixItInsert(fixItStart, "(")
+          .fixItInsertAfter(fixItEnd, fixItSuffix);
+    }
   } else {
-    emitDiagnostic(getDiagnosticOnDecl(), AffectedDecl, lhs, rhs);
+    auto diagnostic = emitDiagnostic(getDiagnosticOnDecl(), AffectedDecl, lhs,
+                                     rhs);
+    if (emitFixIt) {
+      diagnostic.fixItInsert(fixItStart, "(")
+          .fixItInsertAfter(fixItEnd, fixItSuffix);
+    }
   }
 
   maybeEmitRequirementNote(reqDC->getAsDecl(), lhs, rhs);
