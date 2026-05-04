@@ -119,22 +119,27 @@ extension Int | String {    // expected-error {{non-nominal type 'Int | String' 
 }
 
 // §10. Implicit cross-shape conversion — error + fix-it.
-// Per the proposal's fix-it table, subset → ` as T2`, partial
-// overlap → ` as? T2` (primary). The existing legacy
-// `missing_explicit_conversion` path attaches ` as! T2` as a
-// secondary suggestion in both cases. Verify-mode locks the full
-// fix-it set in.
+// Per the proposal's fix-it table, cross-spelling subset (same leaf
+// set, different order) → ` as T2` (free SIL relabel — both sides
+// erase to the same Any-singleton layout, so no runtime check is
+// needed). Partial overlap (different leaf sets) → ` as? T2` (runtime
+// check required). Verify-mode locks the fix-its in. The legacy
+// `missing_explicit_conversion` path also fires and contributes its
+// own copy of the cross-shape `as` fix-it; lit-verify accepts the
+// duplicate as a single match.
 do {
     // Subset: every source leaf is in target's set. Different
-    // spelling, so it's a cross-shape conversion. Fix-it primary
-    // ` as T2`; secondary ` as! T2` from the legacy path.
+    // spelling, so it's a cross-shape conversion. Free relabel —
+    // fix-it suggests ` as T2`.
     let a: Int | String = 7
-    let _: String | Int = a    // expected-error {{cannot convert value of type 'Int | String' to specified type 'String | Int'}} {{28-28= as! String | Int}} {{28-28= as String | Int}}
+    let _: String | Int = a    // expected-error {{cannot convert value of type 'Int | String' to specified type 'String | Int'}} {{28-28= as String | Int}}
 }
 do {
     // Partial overlap: Int is shared, Double-only-in-source.
-    // Fix-it primary ` as? T2` (user may need to make binding
-    // Optional); secondary ` as! T2` from the legacy path.
+    // Runtime check required — fix-it suggests ` as? T2` (the user
+    // may need to make the binding Optional). The legacy
+    // `missing_explicit_conversion` path attaches ` as! T2` as a
+    // secondary suggestion.
     let a: Int | Double = 7
     let _: String | Int = a    // expected-error {{cannot convert value of type 'Int | Double' to specified type 'String | Int'}} {{28-28= as! String | Int}} {{28-28= as? String | Int}}
 }
@@ -177,4 +182,22 @@ do {
     let zs: [Int | String] = [1, "a"]
     let _: [String | Int] = zs    // expected-error {{cannot assign value of type '[Int | String]' to type '[String | Int]'}} {{31-31= as [String | Int]}}
                                   // expected-note@-1 {{arguments to generic parameter 'Element' ('Int | String' and 'String | Int') are expected to be equal}}
+}
+
+// §14. Cross-spelling at argument position of a generic call (proposal
+// §"Generics: where T: A | B"). `where T: A | B` is desugared to
+// `T == A | B` in v1, so passing a value spelled `B | A` triggers the
+// SameType requirement check and is rejected. Spelling-as-identity:
+// `T = A | B` and `T = B | A` are different bindings (different mangled
+// names, different witness identities), so the user must reshape with
+// an explicit `as`. The cast itself is a free SIL relabel — both sides
+// erase to the same Any-singleton existential layout, no runtime check
+// — so the fix-it suggests ` as <expected>`, not ` as!`. Lifting the
+// explicit-cast requirement to a fully order-free leaf-set match
+// (where `where T: A | B` and `where T: B | A` accept the same set of
+// substitutions) is the True set-membership future direction.
+func processGeneric<T>(_ x: T) where T: Int | String {}
+do {
+    let v: String | Int = "hi"
+    processGeneric(v)    // expected-error {{argument type 'String | Int' does not conform to expected type 'Int | String'}} {{21-21= as Int | String}}
 }

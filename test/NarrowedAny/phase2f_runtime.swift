@@ -572,6 +572,13 @@ do {
     assert(acceptUnion("hi") == "shi")
     let v: Int | String = 7
     assert(acceptUnion(v) == "i7")
+    // Reverse-spelling alternation requires an explicit `as` reshape
+    // at the call site. The cast itself is a free SIL relabel — both
+    // sides erase to the same Any-singleton existential layout — so
+    // the runtime dispatch through `acceptUnion`'s body picks up the
+    // dynamic leaf (String "hi") regardless of the reshape.
+    let v2: String | Int = "hi"
+    assert(acceptUnion(v2 as Int | String) == "shi")
 }
 
 // MARK: 8a. `as!` to constrained existential works (today's workaround

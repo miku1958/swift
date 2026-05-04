@@ -3950,17 +3950,19 @@ bool ContextualFailure::tryTypeCoercionFixIt(
     }
   }
 
-  // Cross-spelling narrowed-`Any` reshape at *container* position
-  // (proposal §"Containers and extensions"; row #21 + #33). The
-  // value-level case (`a as String | Int` where `a: Int | String`)
-  // is already handled by the typeCheckCheckedCast → Coercion path
-  // below, so we only short-circuit when the mismatch is anchored on
-  // a `BoundGenericType` whose generic args are cross-spelling-equal
-  // narrowed-Any. Without this, the typeCheckCheckedCast call below
-  // classifies it as ArrayDowncast (suggesting `as!`), but the
-  // proposal classifies cross-spelling reshape as a runtime-free `as`
-  // relabel (single `unchecked_addr_cast` at SIL level — both sides
-  // erase to the same Any-singleton element layout).
+  // Cross-spelling narrowed-`Any` reshape (proposal §"Containers and
+  // extensions"; row #21 + #33). Both value-level (`Int|String` →
+  // `String|Int`) and container-position (`[Int|String]` →
+  // `[String|Int]`) cases. `typeCheckCheckedCast` doesn't model
+  // narrowed-Any spelling-as-identity at the cast layer and ends up
+  // returning `ValueCast` (suggesting `as!`) or `ArrayDowncast` for the
+  // container case (suggesting `as!`) — but the proposal classifies
+  // cross-spelling reshape as a runtime-free `as` relabel: both sides
+  // erase to the same Any-singleton (or Array-of-Any-singleton) layout,
+  // so SIL emits a single `unchecked_addr_cast`. Detect the case
+  // structurally — same NarrowedAnyType leaf set, or matching generic
+  // decl with cross-spelling-equal generic args — and short-circuit to
+  // an ` as <toType>` fix-it before `typeCheckCheckedCast` runs.
   std::function<bool(Type, Type)> isCrossSpellingReshape =
       [&](Type a, Type b) -> bool {
     if (a->getCanonicalType() == b->getCanonicalType())
@@ -3999,9 +4001,7 @@ bool ContextualFailure::tryTypeCoercionFixIt(
         return false;
     return true;
   };
-  if (toType->hasTypeRepr() && fromType->is<BoundGenericType>() &&
-      toType->is<BoundGenericType>() &&
-      isCrossSpellingReshape(fromType, toType)) {
+  if (toType->hasTypeRepr() && isCrossSpellingReshape(fromType, toType)) {
     auto attachToType = bothOptional ? OptionalType::get(toType) : toType;
     diagnostic.fixItInsert(
         Lexer::getLocForEndOfToken(getASTContext().SourceMgr,
