@@ -431,6 +431,20 @@ ExistentialLayout CanType::getExistentialLayout() {
   if (auto narrowed = dyn_cast<NarrowedAnyType>(ty))
     return ExistentialLayout(CanNarrowedAnyType(narrowed));
 
+  // Defensive fallback for malformed `ExistentialType(<concrete>)`
+  // produced transiently by `repairFailures` at the
+  // `ExistentialConstraintType` locator when narrowed-Any leaf-level
+  // Bind matching fails (e.g. `Int|String` vs `String|Int` recurses
+  // to `Int` vs `String`, then `repairFailures` wraps each leaf as
+  // `ExistentialType::get(Int)`). Such a wrap is not a real
+  // existential and reaching this fallthrough used to crash via
+  // `cast<ProtocolCompositionType>`. Returning the empty layout makes
+  // `isAnyObject()` and friends correctly answer `false`, letting the
+  // upstream repair path emit its requirement-failure diagnostic
+  // instead of aborting compilation.
+  if (!isa<ProtocolCompositionType>(ty))
+    return ExistentialLayout();
+
   auto comp = cast<ProtocolCompositionType>(ty);
   return ExistentialLayout(comp);
 }
