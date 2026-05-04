@@ -822,6 +822,43 @@ do {
     assert(got == "fs:/etc")
 }
 
+// MARK: 12q.b. Per-leaf propagation at the *return* boundary
+// Mirrors §12q for return values: the runtime returned value is one
+// concrete leaf, so propagating it from a callee with one alternation
+// spelling into a caller declared with the same leaf set in a
+// different spelling is a value-flow check — no `as` reshape needed.
+// Same-spelling and leaf-injection variants are also covered.
+//
+// Rule: proposal §"Return-position is per-leaf, not per-spelling"
+do {
+    func a() -> Int | String { return 7 }
+
+    // Same spelling — trivial identity, must be legal.
+    func b1() -> Int | String { return a() }
+    let v1 = b1()
+    assert((v1 as? Int) == 7)
+
+    // Reverse-spelling — different signature identity but same leaf
+    // set; runtime returned value (Int 7) fits b2's declared set.
+    func b2() -> String | Int { return a() }
+    let v2 = b2()
+    assert((v2 as? Int) == 7)
+
+    // Leaf-injection — callee returns Int, caller declares Int|String;
+    // the runtime returned value is the Int leaf, fits the wider set.
+    func intOnly() -> Int { return 42 }
+    func b3() -> Int | String { return intOnly() }
+    let v3 = b3()
+    assert((v3 as? Int) == 42)
+
+    // Cross-spelling with a String value, just to confirm both leaves
+    // round-trip cleanly across the spelling boundary.
+    func aS() -> Int | String { return "hi" }
+    func b4() -> String | Int { return aS() }
+    let v4 = b4()
+    assert((v4 as? String) == "hi")
+}
+
 // MARK: 12r. Uninhabited (Never) leaves and the inhabited-subset rule
 // Forum reference: https://forums.swift.org/t/pitch-narrowed-any/86369/9
 // (mattie's enum-desugar question + Nobody1707's `A | Never` follow-up).

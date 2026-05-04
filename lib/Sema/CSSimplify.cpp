@@ -4344,11 +4344,11 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
       if (auto *expr = anchor.dyn_cast<Expr *>())
         isExplicitCoerce = isa<CoerceExpr>(expr);
     }
-    // Per-leaf flow at the throws boundary: spelling-as-identity
-    // applies to function-type signatures, but try-site / throw-site
-    // propagation is a value-flow check — the runtime thrown value
-    // is one concrete leaf, so what matters is that every inhabited
-    // leaf of the inner throws set has a home in the outer's
+    // Per-leaf flow at the throws / return boundary: spelling-as-identity
+    // applies to function-type signatures, but throw-site / return-site
+    // propagation is a value-flow check — the runtime thrown / returned
+    // value is one concrete leaf, so what matters is that every inhabited
+    // leaf of the inner narrowed-`Any` set has a home in the outer's
     // declared set, regardless of how either side spelled the
     // alternation. `Never` leaves are uninhabited and trivially fit
     // any outer set (inhabited-subset rule). The proposal's
@@ -4356,25 +4356,35 @@ ConstraintSystem::matchExistentialTypes(Type type1, Type type2,
     // §"Uninhabited (Never) leaves" formalise this; SE-0413's
     // `throws(SpecificError) → throws(any Error)` is the same
     // posture, just generalised from "subtype of any Error" to
-    // "leaf-set subset modulo Never".
+    // "leaf-set subset modulo Never". Return-position propagation
+    // mirrors the throws posture: `func b() -> A | B { a() }` where
+    // `a() -> B | A` is value-flow into `b`'s declared return slot,
+    // and the runtime returned value is one concrete leaf — same
+    // reasoning, no `as` reshape needed.
     //
-    // The constraint reaches this call from two anchor shapes:
+    // The constraint reaches this call from these anchor shapes:
     // (a) function-type thrown-error matching — locator ends with
     //     LocatorPathElt::ThrownErrorType (matchFunctionThrowing's
-    //     Dependent fallthrough), and
+    //     Dependent fallthrough),
     // (b) `try f()` rewrap — TypeCheckEffects::checkThrownErrorType
     //     starts a fresh typeCheckExpression with CTP_ThrowStmt as
     //     the contextual purpose; locator ends with
-    //     LocatorPathElt::ContextualType(CTP_ThrowStmt).
+    //     LocatorPathElt::ContextualType(CTP_ThrowStmt),
+    // (c) `return expr` — locator ends with
+    //     LocatorPathElt::ContextualType(CTP_ReturnStmt).
     bool isThrownErrorContext =
         locator.endsWith<LocatorPathElt::ThrownErrorType>();
     bool isThrowContextual = false;
+    bool isReturnContextual = false;
     if (auto last = locator.last()) {
       if (auto ct = last->getAs<LocatorPathElt::ContextualType>()) {
-        isThrowContextual = ct->getPurpose() == CTP_ThrowStmt;
+        auto purpose = ct->getPurpose();
+        isThrowContextual = purpose == CTP_ThrowStmt;
+        isReturnContextual = purpose == CTP_ReturnStmt;
       }
     }
-    if (isExplicitCoerce || isThrownErrorContext || isThrowContextual) {
+    if (isExplicitCoerce || isThrownErrorContext || isThrowContextual ||
+        isReturnContextual) {
       Type type1Inner = type1;
       if (auto *ext = type1->getAs<ExistentialType>())
         type1Inner = ext->getConstraintType();

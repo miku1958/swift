@@ -201,3 +201,16 @@ do {
     let v: String | Int = "hi"
     processGeneric(v)    // expected-error {{argument type 'String | Int' does not conform to expected type 'Int | String'}} {{21-21= as Int | String}}
 }
+
+// §15. Return position with disjoint leaf sets — must still error.
+// Cross-spelling and leaf-injection at return position propagate
+// silently (proposal §"Return-position is per-leaf, not per-spelling";
+// runtime returned value is one concrete leaf, fits any compatible
+// outer set). But disjoint sets — no inhabited leaf can fit — must
+// reject; the positive cases live in the runtime test bed. The
+// fix-it points at `as!` because the runtime check is genuinely
+// non-trivial here (Int|String → Bool|Double can never succeed).
+func returnIntString() -> Int | String { return 7 }
+func disjointReturn() -> Bool | Double {
+    return returnIntString()  // expected-error {{cannot convert return expression of type 'Int | String' to return type 'Bool | Double'}} {{29-29= as! Bool | Double}}
+}
