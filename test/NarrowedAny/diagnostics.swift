@@ -17,6 +17,9 @@
 //   §7  pattern `case _ as T` — disjoint pattern arm errors
 //   §8  cross-spelling extension dispatch — error
 //   §9  `extension Int | String { }` — non-nominal target
+//   §17 container narrowing — `[A | B]` → `[A]`, `[K: V | W]` → `[K: V]`
+//   §18 disjoint container element sets — `[A | B]` → `[C | D]`
+//   §19 function-type variance — strict invariant on narrowed-Any positions
 
 // §1. Disjoint cast in any of as / as? / as!
 do {
@@ -221,4 +224,46 @@ func f16b<T: Int | String>(_ x: T) {}            // expected-error {{narrowed-`A
 func returnIntString() -> Int | String { return 7 }
 func disjointReturn() -> Bool | Double {
     return returnIntString()  // expected-error {{cannot convert return expression of type 'Int | String' to return type 'Bool | Double'}} {{29-29= as! Bool | Double}}
+}
+
+// §17. Container narrowing — generic containers are invariant in
+// their element type (proposal §"Subtyping lattice"; row #21). Going
+// from a wider leaf set to a narrower one cannot lift element-wise
+// because some inhabitants don't fit, so it is rejected at Sema with
+// the standard generic-argument-mismatch wording. Element-lift in the
+// widening direction is the implicit-conversion case (row #21 / #33);
+// see `phase2f_runtime.swift §1` for the positive bed.
+do {
+    let zs: [Int | String] = [1, "a"]
+    let _: [Int] = zs    // expected-error {{cannot assign value of type '[Int | String]' to type '[Int]'}}
+                         // expected-note@-1 {{arguments to generic parameter 'Element' ('Int | String' and 'Int') are expected to be equal}}
+}
+do {
+    let m: [String: Int | Bool] = ["a": 1]
+    let _: [String: Int] = m    // expected-error {{cannot assign value of type '[String : Int | Bool]' to type '[String : Int]'}}
+                                // expected-note@-1 {{arguments to generic parameter 'Value' ('Int | Bool' and 'Int') are expected to be equal}}
+}
+
+// §18. Disjoint container element sets — `[A | B]` → `[C | D]` with
+// no overlapping leaves cannot succeed for any element, so the
+// implicit conversion is rejected. Mirrors §15's return-position rule
+// at the container level. Cross-spelling (same leaf set, different
+// order) goes through §13's path with a `as` fix-it; truly disjoint
+// has no fix-it because no relabel can rescue it.
+do {
+    let zs: [Int | String] = [1, "a"]
+    let _: [Bool | Double] = zs    // expected-error {{cannot assign value of type '[Int | String]' to type '[Bool | Double]'}}
+                                   // expected-note@-1 {{arguments to generic parameter 'Element' ('Int | String' and 'Bool | Double') are expected to be equal}}
+}
+
+// §19. Function-type variance — narrowed-`Any` positions are strict
+// invariant (proposal §"Subtyping lattice"). A leaf-typed parameter
+// does not contravary into a narrowed-`Any` parameter (would require
+// caller-side widening); the relaxation lives in the variance
+// future direction (proposal §"Variance at the protocol-witness
+// boundary"). v1 rejects with the standard function-conversion
+// wording.
+do {
+    let f: (Int) -> Void = { _ in }
+    let _: (Int | String) -> Void = f    // expected-error {{cannot convert value of type '(Int) -> Void' to specified type '(Int | String) -> Void'}}
 }
