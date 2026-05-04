@@ -3999,9 +3999,79 @@ ConstraintSystem::matchDeepEqualityTypes(Type type1, Type type2,
     auto alts2 = na2->getAlternatives();
     if (alts1.size() != alts2.size())
       return getTypeMatchFailure(locator);
+    // Cross-spelling detection (decision row #21 / row #33): same leaf
+    // SET in different order is "spelling-as-identity unequal" but
+    // value-flow leaf-set-equal. For type identity it must fail; for
+    // user-facing diagnostics we want a clean fix anchored at the
+    // appropriate level (requirement-failure if the path carries one,
+    // otherwise the conversion locator), not the leaf-by-leaf Bind
+    // path which inherits `ExistentialConstraintType` and routes
+    // `repairFailures` through the malformed `ExistentialType::get(Int)`
+    // wrap (defensive layout fallback only stops the crash; it doesn't
+    // synthesise a useful fix).
+    auto canonicalLeafSet = [](ArrayRef<Type> alts) {
+      llvm::SmallVector<CanType, 4> canon;
+      for (Type t : alts)
+        canon.push_back(t->getCanonicalType());
+      llvm::sort(canon, [](CanType a, CanType b) {
+        return a.getPointer() < b.getPointer();
+      });
+      return canon;
+    };
+    auto sortedSet1 = canonicalLeafSet(alts1);
+    auto sortedSet2 = canonicalLeafSet(alts2);
+    bool sameLeafSet = (sortedSet1 == sortedSet2);
+    if (sameLeafSet && shouldAttemptFixes()) {
+      // Record a fix anchored at the right level. Walk path looking
+      // for an `AnyRequirement` element — if present, this is a
+      // requirement-failure context (e.g. extension-where-clause
+      // matching), and the right diagnostic is
+      // SameTypeRequirementFailure ("requires the types <NA1> and
+      // <NA2> be equivalent"). Otherwise this is a plain
+      // conversion / generic-argument mismatch and the right anchor
+      // is the conversion locator (yielding "cannot convert value of
+      // type <X> to type <Y>" + cross-shape `as` fix-it via the
+      // GenericArgumentsMismatch path at the BoundGenericType match
+      // level above us).
+      llvm::SmallVector<LocatorPathElt, 4> path;
+      auto anchor = locator.getLocatorParts(path);
+      // Scan for the deepest AnyRequirement element.
+      int reqIdx = -1;
+      for (int i = (int)path.size() - 1; i >= 0; --i) {
+        if (path[i].is<LocatorPathElt::AnyRequirement>()) {
+          reqIdx = i;
+          break;
+        }
+      }
+      if (reqIdx >= 0) {
+        // Truncate path to end at the requirement element so the fix
+        // is recorded at the requirement locator (the requirement
+        // diagnoser walks up from there to the extension / call site).
+        ArrayRef<LocatorPathElt> reqPath(path.data(), reqIdx + 1);
+        if (auto *fix =
+                fixRequirementFailure(*this, type1, type2, anchor, reqPath)) {
+          if (!recordFix(fix))
+            return getTypeMatchSuccess();
+        }
+      }
+      // Fall through to the leaf-by-leaf Bind path; the BoundGenericType
+      // match above will record a `GenericArgumentsMismatch` fix and
+      // the constraint solver salvages the proper "cannot convert"
+      // diagnostic with cross-shape fix-it.
+    }
+    // Push a fresh GenericArgument element so leaf-level Bind failures
+    // don't inherit `ExistentialConstraintType` from the enclosing
+    // ExistentialType match (which would route `repairFailures`
+    // through the malformed `ExistentialType::get(<concrete leaf>)`
+    // wrap; the defensive fallback in
+    // `CanType::getExistentialLayout` stops the crash but the wrap
+    // also defeats upstream `GenericArgumentsMismatch` fix recording
+    // for cross-spelling container assignment).
     for (unsigned i = 0, e = alts1.size(); i < e; ++i) {
+      auto leafLocator = locator.withPathElement(
+                            LocatorPathElt::GenericArgument(i));
       auto result = matchTypes(alts1[i], alts2[i],
-                               ConstraintKind::Bind, subflags, locator);
+                               ConstraintKind::Bind, subflags, leafLocator);
       if (result.isFailure())
         return result;
     }

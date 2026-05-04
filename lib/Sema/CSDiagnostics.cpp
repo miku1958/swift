@@ -3950,6 +3950,66 @@ bool ContextualFailure::tryTypeCoercionFixIt(
     }
   }
 
+  // Cross-spelling narrowed-`Any` reshape at *container* position
+  // (proposal §"Containers and extensions"; row #21 + #33). The
+  // value-level case (`a as String | Int` where `a: Int | String`)
+  // is already handled by the typeCheckCheckedCast → Coercion path
+  // below, so we only short-circuit when the mismatch is anchored on
+  // a `BoundGenericType` whose generic args are cross-spelling-equal
+  // narrowed-Any. Without this, the typeCheckCheckedCast call below
+  // classifies it as ArrayDowncast (suggesting `as!`), but the
+  // proposal classifies cross-spelling reshape as a runtime-free `as`
+  // relabel (single `unchecked_addr_cast` at SIL level — both sides
+  // erase to the same Any-singleton element layout).
+  std::function<bool(Type, Type)> isCrossSpellingReshape =
+      [&](Type a, Type b) -> bool {
+    if (a->getCanonicalType() == b->getCanonicalType())
+      return true;
+    Type aInner = a;
+    if (auto *ext = a->getAs<ExistentialType>())
+      aInner = ext->getConstraintType();
+    Type bInner = b;
+    if (auto *ext = b->getAs<ExistentialType>())
+      bInner = ext->getConstraintType();
+    if (auto *naA = aInner->getAs<NarrowedAnyType>()) {
+      auto *naB = bInner->getAs<NarrowedAnyType>();
+      if (!naB)
+        return false;
+      auto canSet = [](ArrayRef<Type> alts) {
+        llvm::SmallVector<CanType, 4> canon;
+        for (Type t : alts)
+          canon.push_back(t->getCanonicalType());
+        llvm::sort(canon, [](CanType x, CanType y) {
+          return x.getPointer() < y.getPointer();
+        });
+        return canon;
+      };
+      return canSet(naA->getAlternatives()) == canSet(naB->getAlternatives());
+    }
+    auto *boundA = a->getAs<BoundGenericType>();
+    auto *boundB = b->getAs<BoundGenericType>();
+    if (!boundA || !boundB || boundA->getDecl() != boundB->getDecl())
+      return false;
+    auto argsA = boundA->getGenericArgs();
+    auto argsB = boundB->getGenericArgs();
+    if (argsA.size() != argsB.size())
+      return false;
+    for (unsigned i = 0, e = argsA.size(); i < e; ++i)
+      if (!isCrossSpellingReshape(argsA[i], argsB[i]))
+        return false;
+    return true;
+  };
+  if (toType->hasTypeRepr() && fromType->is<BoundGenericType>() &&
+      toType->is<BoundGenericType>() &&
+      isCrossSpellingReshape(fromType, toType)) {
+    auto attachToType = bothOptional ? OptionalType::get(toType) : toType;
+    diagnostic.fixItInsert(
+        Lexer::getLocForEndOfToken(getASTContext().SourceMgr,
+                                   getSourceRange().End),
+        diag::insert_type_coercion, /*canUseAs=*/true, attachToType);
+    return true;
+  }
+
   CheckedCastKind Kind = TypeChecker::typeCheckCheckedCast(
       fromType, toType, CheckedCastContextKind::None, getDC());
 

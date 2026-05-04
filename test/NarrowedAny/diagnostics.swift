@@ -159,19 +159,22 @@ typealias T11c = (Int | String) & (Int | String)  // expected-error {{non-protoc
 func f12<T>(_ x: T) where T: Int | String, T: Int | Bool {}
                               // expected-error@-1 {{no type for 'T' can satisfy both}}
 
-// §13. Cross-spelling Array assignment — used to crash in
+// §13. Cross-spelling Array assignment (proposal §"Containers and
+// extensions"; row #21 + #33). Implicit cross-spelling container
+// conversion is rejected with `cannot assign value of type ...` plus
+// a generic-argument-mismatch note pointing at the differing
+// `Element` spellings. The user is expected to add an explicit
+// reshape `as [String | Int]` (runtime-free relabel — a single
+// `unchecked_addr_cast` at SIL level — since both sides erase to the
+// same Any-singleton element layout). Used to crash in
 // `repairFailures` via a malformed `ExistentialType(<concrete leaf>)`
-// that reached `CanType::getExistentialLayout`'s
-// `cast<ProtocolCompositionType>` and aborted. The defensive fallback
-// in `getExistentialLayout` (return empty layout when the type is
-// neither a recognised existential constraint nor a protocol
-// composition) stops the crash. The proper diagnostic + fix-it for
-// implicit cross-spelling container conversion (proposal §"Containers
-// and extensions"; §四 第二项) is multi-day Sema work — the current
-// "failed to produce diagnostic" is a known gap, not a goal of this
-// test. Verify-mode locks only the no-crash + the present fallback
-// diagnostic so a regression to the abort path is caught immediately.
+// before the cross-spelling-aware fix in
+// `matchDeepEqualityTypes::NarrowedAnyType` branch (records
+// `GenericArgumentsMismatch` for plain conversion, hands off to
+// `fixRequirementFailure` when a `where`-clause requirement is on
+// the locator).
 do {
     let zs: [Int | String] = [1, "a"]
-    let _: [String | Int] = zs    // expected-error {{failed to produce diagnostic for expression}}
+    let _: [String | Int] = zs    // expected-error {{cannot assign value of type '[Int | String]' to type '[String | Int]'}} {{31-31= as [String | Int]}}
+                                  // expected-note@-1 {{arguments to generic parameter 'Element' ('Int | String' and 'String | Int') are expected to be equal}}
 }
