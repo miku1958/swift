@@ -48,6 +48,41 @@ let bothComposed:
     | (Sequence & IteratorProtocol) = "v"
 assert(bothComposed as? String == "v")
 
+// MARK: 3b. Leaf-set preservation across `(P & Q) | (P & R)` — distinct
+// composition leaves stay distinct at the cast surface (no
+// normalisation to `P & (Q | R)`-shape, which would collapse the
+// two leaves into one). Proposal §"What is *not* normalised" +
+// design decision row #5: leaf set is preserved as written, never auto-flattened.
+protocol PE3b {}
+protocol QE3b {}
+protocol RE3b {}
+struct PQE3b: PE3b, QE3b { let tag = "pq" }
+struct PRE3b: PE3b, RE3b { let tag = "pr" }
+do {
+    let pq: PE3b & QE3b = PQE3b()
+    let pr: PE3b & RE3b = PRE3b()
+
+    // Each leaf accepts its own composition shape (leaf injection).
+    let n1: (PE3b & QE3b) | (PE3b & RE3b) = pq
+    let n2: (PE3b & QE3b) | (PE3b & RE3b) = pr
+
+    // Cross-leaf negative: a `P & Q` value must NOT cast back through
+    // the `P & R` leaf, and vice versa. If `(P&Q) | (P&R)` had been
+    // normalised to a `P & (Q | R)`-shaped composition, both casts
+    // would have to succeed (or both fail) since the two structs only
+    // differ by Q-vs-R conformance, which would no longer be a leaf
+    // distinction. The fact that exactly one direction works on each
+    // value is the runtime witness that the two leaves remain distinct.
+    assert((n1 as? (PE3b & QE3b)) != nil, "leaf 1 (P&Q) accepts a P&Q value")
+    assert((n1 as? (PE3b & RE3b)) == nil, "leaf 1 value must not satisfy leaf 2's P&R")
+    assert((n2 as? (PE3b & QE3b)) == nil, "leaf 2 value must not satisfy leaf 1's P&Q")
+    assert((n2 as? (PE3b & RE3b)) != nil, "leaf 2 (P&R) accepts a P&R value")
+
+    // The shared P interface is reachable through either leaf.
+    assert((n1 as? PE3b) != nil)
+    assert((n2 as? PE3b) != nil)
+}
+
 // MARK: 4. Generic argument carrying a union — `Optional<A | B>` and
 // `Result<A | B, Error>`-shaped uses (covered by parser only; no
 // generic specialisation today).
