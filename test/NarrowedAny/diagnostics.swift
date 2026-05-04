@@ -156,12 +156,12 @@ typealias T11a = (Int | String) & P11        // expected-error {{non-protocol, n
 typealias T11b = (Int | String) & C11        // expected-error {{non-protocol, non-class type 'Int | String' cannot be used within a protocol-constrained type}}
 typealias T11c = (Int | String) & (Int | String)  // expected-error {{non-protocol, non-class type 'Int | String' cannot be used within a protocol-constrained type}} expected-error {{non-protocol, non-class type 'Int | String' cannot be used within a protocol-constrained type}}
 
-// §12. Multi-clause `where T: A | B, T: C | D` — rejected.
+// §12. Multi-clause `where T == A | B, T == C | D` — rejected.
 // Decision row #13: a single narrowed-Any constraint per type
-// parameter; the type-checker sees the second clause as a
-// conflicting same-type requirement (slice-3.C lowers
-// `where T: A | B` to `where T == A | B`).
-func f12<T>(_ x: T) where T: Int | String, T: Int | Bool {}
+// parameter; the type-checker sees the second same-type clause as a
+// conflicting requirement. v1 only accepts the `==` form (the colon
+// form is rejected at parse time by §16 below).
+func f12<T>(_ x: T) where T == Int | String, T == Int | Bool {}
                               // expected-error@-1 {{no type for 'T' can satisfy both}}
 
 // §13. Cross-spelling Array assignment (proposal §"Containers and
@@ -184,23 +184,31 @@ do {
                                   // expected-note@-1 {{arguments to generic parameter 'Element' ('Int | String' and 'String | Int') are expected to be equal}}
 }
 
-// §14. Cross-spelling at argument position of a generic call (proposal
-// §"Generics: where T: A | B"). `where T: A | B` is desugared to
-// `T == A | B` in v1, so passing a value spelled `B | A` triggers the
-// SameType requirement check and is rejected. Spelling-as-identity:
-// `T = A | B` and `T = B | A` are different bindings (different mangled
-// names, different witness identities), so the user must reshape with
-// an explicit `as`. The cast itself is a free SIL relabel — both sides
-// erase to the same Any-singleton existential layout, no runtime check
-// — so the fix-it suggests ` as <expected>`, not ` as!`. Lifting the
-// explicit-cast requirement to a fully order-free leaf-set match
-// (where `where T: A | B` and `where T: B | A` accept the same set of
-// substitutions) is the True set-membership future direction.
-func processGeneric<T>(_ x: T) where T: Int | String {}
+// §14. Cross-spelling at argument position of a generic call.
+// v1 commits to `where T == A | B` (the colon form is rejected at
+// parse time by §16 below), so passing a value spelled `B | A`
+// triggers the SameType requirement check and is rejected.
+// Spelling-as-identity: `T = A | B` and `T = B | A` are different
+// bindings (different mangled names, different witness identities),
+// so the user must reshape with an explicit `as`. The cast itself
+// is a free SIL relabel — both sides erase to the same Any-singleton
+// existential layout, no runtime check — so the fix-it suggests
+// ` as <expected>`, not ` as!`. Lifting the explicit-cast requirement
+// to a fully order-free leaf-set match is the True set-membership
+// future direction (which would also re-enable the colon form with
+// proper set-membership semantics).
+func processGeneric<T>(_ x: T) where T == Int | String {}
 do {
     let v: String | Int = "hi"
     processGeneric(v)    // expected-error {{argument type 'String | Int' does not conform to expected type 'Int | String'}} {{21-21= as Int | String}}
 }
+
+// §16. Colon form `where T: A | B` is rejected at parse time —
+// reserved for the True set-membership future direction. Both the
+// where-clause form and the generic-parameter shorthand error.
+func f16a<T>(_ x: T) where T: Int | String {}    // expected-error {{narrowed-`Any` (`A | B`) cannot appear in a conformance constraint; v1 commits to the same-type form, write 'where T == A | B' instead (the colon form is reserved for a future direction)}}
+
+func f16b<T: Int | String>(_ x: T) {}            // expected-error {{narrowed-`Any` (`A | B`) cannot appear in a conformance constraint; v1 commits to the same-type form, write 'where T == A | B' instead (the colon form is reserved for a future direction)}}
 
 // §15. Return position with disjoint leaf sets — must still error.
 // Cross-spelling and leaf-injection at return position propagate

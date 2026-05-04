@@ -1922,6 +1922,10 @@ NOTE(suggest_anyobject,none,
 ERROR(expected_generics_type_restriction,none,
       "expected a class type or protocol-constrained type restricting %0",
       (Identifier))
+ERROR(narrowed_any_constraint_must_use_eq,none,
+      "narrowed-`Any` (`A | B`) cannot appear in a conformance constraint; "
+      "v1 commits to the same-type form, write 'where T == A | B' instead "
+      "(the colon form is reserved for a future direction)", ())
 ERROR(requires_single_equal,none,
       "use '==' for same-type requirements rather than '='", ())
 ERROR(requires_comma,none,

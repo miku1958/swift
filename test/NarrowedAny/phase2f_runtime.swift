@@ -309,19 +309,25 @@ do {
     assert("\(desc)" == "42")
 }
 
-// MARK: 12k. Combined `where T: A | B, T: P` constraints
-// Both clauses must hold. The same-type desugar of the narrowed-Any
-// clause + Phase 3.A's synth conformance for marker / self-conf
-// protocols compose: when every leaf conforms to P, the constraint
-// is satisfiable; otherwise Sema reports a clear conflict.
+// MARK: 12k. `where T == A | B` covers `T: P` automatically when every
+// leaf conforms to P. v1 only accepts the same-type form (`T == A | B`);
+// adding a separate `T: Error` clause is rejected by Swift's existing
+// rule "no type for 'T' can satisfy both 'T == X' and 'T : SomeProto'",
+// and is anyway unnecessary — Phase 3.A's synth conformance for marker
+// / self-conformance protocols (Error among them) makes `Int | String`
+// already conform to Error when both leaves do, so `T == CombE1 |
+// CombE2` already supplies the Error conformance through the leaf-
+// composed witness.
 struct CombE1: Error {}
 struct CombE2: Error {}
-func combinedHandle<T>(_ x: T) -> String where T: CombE1 | CombE2, T: Error {
+func combinedHandle<T>(_ x: T) -> String where T == CombE1 | CombE2 {
     return String(describing: x)
 }
 do {
-    assert(combinedHandle(CombE1()).contains("CombE1"))
-    assert(combinedHandle(CombE2()).contains("CombE2"))
+    let e1: CombE1 | CombE2 = CombE1()
+    let e2: CombE1 | CombE2 = CombE2()
+    assert(combinedHandle(e1).contains("CombE1"))
+    assert(combinedHandle(e2).contains("CombE2"))
 }
 
 // MARK: 12l. Generic wrapper of typed throws — `T: Error` accepts narrowed-Any
@@ -510,7 +516,7 @@ do {
 struct RunnerErr1: Error, Equatable { let v: Int }
 struct RunnerErr2: Error, Equatable { let v: Int }
 func runner<T>(_ x: T) throws(RunnerErr1 | RunnerErr2) -> Int
-    where T: Int | String {
+    where T == Int | String {
     switch x {
     case let n as Int:
         if n < 0 { throw RunnerErr1(v: n) }
@@ -522,7 +528,7 @@ func runner<T>(_ x: T) throws(RunnerErr1 | RunnerErr2) -> Int
 }
 do {
     var hits: [String] = []
-    func attempt<T>(_ v: T) where T: Int | String {
+    func attempt<T>(_ v: T) where T == Int | String {
         do { hits.append("ok:\(try runner(v))") }
         catch let e as RunnerErr1 { hits.append("e1:\(e.v)") }
         catch let e as RunnerErr2 { hits.append("e2:\(e.v)") }
@@ -534,12 +540,14 @@ do {
     assert(hits == ["ok:5", "ok:5", "e1:-3", "e2:0"], "got \(hits)")
 }
 
-// MARK: 12a. Switch in the body of `where T: A | B`
-// The Phase 2b.E SpaceEngine work + Phase 3.C constraint lowering
-// compose: a `switch x` in a body where `T: A | B` (bound to the
-// union) is exhaustive over the leaf set with no `default:`. The
-// closed conformer set carries through generic bodies.
-func dispatch<T>(_ x: T) -> String where T: Int | String {
+// MARK: 12a. Switch in the body of `where T == A | B`
+// The Phase 2b.E SpaceEngine work composes with the same-type constraint:
+// a `switch x` in a body where `T == A | B` is exhaustive over the leaf
+// set with no `default:`. The closed conformer set carries through
+// generic bodies. (v1 only accepts the `==` form; the colon form is
+// reserved for a future direction — see proposal §"Generics: where T
+// == A | B" + § Future directions § True set-membership.)
+func dispatch<T>(_ x: T) -> String where T == Int | String {
     switch x {
     case let n as Int:    return "i\(n)"
     case let s as String: return "s\(s)"
@@ -552,17 +560,18 @@ do {
     assert(dispatch(v) == "i7")
 }
 
-// MARK: 12. `where T: A | B` — generic constraint
-// Phase 3.C: prototype desugars `where T: A | B` to `where T == A | B`
-// because Swift's generic system doesn't model disjunctive
-// requirements. Callers passing leaves get the call-site leaf-
-// injection rule. The body sees T as the union itself.
+// MARK: 12. `where T == A | B` — generic same-type constraint
+// v1 commits to the same-type spelling: T is bound to the alternation
+// itself, callers passing leaves get call-site leaf-injection. The
+// colon form `where T: A | B` is rejected at parse time (reserved for
+// a future direction — see proposal §"Future directions § True set-
+// membership"); the body sees T as the union, so a `switch x` over T
+// is exhaustive over the leaf set.
 //
 // (The compiler emits a "same-type makes T non-generic" warning,
-// inherited from the `T == ...` desugaring. Acceptable for prototype;
-// real set-membership lands when disjunctive requirements are
-// designed.)
-func acceptUnion<T>(_ x: T) -> String where T: Int | String {
+// inherited from `T == ...`. Acceptable for v1; real set-membership
+// lands when disjunctive requirements are designed.)
+func acceptUnion<T>(_ x: T) -> String where T == Int | String {
     if let i = x as? Int    { return "i\(i)" }
     if let s = x as? String { return "s\(s)" }
     return "?"

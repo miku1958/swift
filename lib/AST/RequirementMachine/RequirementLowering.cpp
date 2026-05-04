@@ -576,26 +576,21 @@ void swift::rewriting::realizeTypeRequirement(DeclContext *dc,
     }
   }
 
-  // Phase 3.C (prototype): desugar `where T: A | B` to `where T == A | B`.
-  // The proposal's set-membership reading would let T be either a leaf
-  // or the union itself; that needs disjunctive requirements which
-  // Swift's generic system doesn't model. As a prototype affordance,
-  // accept the `T:` spelling and bind T to the narrowed `Any` itself.
-  // Callers can still pass leaves via the call-site leaf-injection
-  // rule. The body sees T as the union (the "join shape" path from
-  // proposal §Issue 6).
-  bool constraintIsNarrowedAny = false;
+  // narrowed-`Any` (`A | B`) is rejected at parse time when it appears
+  // in the conformance-constraint colon form (`where T: A | B` and the
+  // `<T: A | B>` shorthand) — see `ParseGeneric.cpp`'s
+  // `narrowed_any_constraint_must_use_eq` diagnostic. v1 commits to
+  // the same-type spelling; the colon form is reserved for a future
+  // direction. Assert that nothing here ever sees a NarrowedAnyType in
+  // conformance position so a future regression can't silently re-enable
+  // the prototype's old `T: A | B` → `T == A | B` desugar.
   if (auto *ext = constraintType->getAs<ExistentialType>())
-    constraintIsNarrowedAny = ext->getConstraintType()->is<NarrowedAnyType>();
-  else
-    constraintIsNarrowedAny = constraintType->is<NarrowedAnyType>();
-
-  if (constraintIsNarrowedAny) {
-    result.push_back({Requirement(RequirementKind::SameType,
-                                  subjectType, constraintType),
-                      loc});
-    return;
-  }
+    ASSERT(!ext->getConstraintType()->is<NarrowedAnyType>() &&
+           "narrowed-`Any` in conformance position should have been "
+           "rejected by the parser");
+  ASSERT(!constraintType->is<NarrowedAnyType>() &&
+         "narrowed-`Any` in conformance position should have been "
+         "rejected by the parser");
 
   if (constraintType->isConstraintType()) {
     result.push_back({Requirement(RequirementKind::Conformance,

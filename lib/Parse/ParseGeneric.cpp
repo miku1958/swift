@@ -125,6 +125,17 @@ Parser::parseGenericParametersBeforeWhere(SourceLoc LAngleLoc,
       if (Ty.hasCodeCompletion())
         return makeParserCodeCompletionStatus();
 
+      // Reject narrowed-`Any` (`A | B`) in the colon-form generic-parameter
+      // shorthand. v1 commits to `where T == A | B`; the colon form is
+      // reserved for a future direction (set-membership / order-insensitive
+      // marker). Drop the parsed type repr so it never enters the AST.
+      if (Ty.isNonNull() && isa<NarrowedAnyTypeRepr>(Ty.get())) {
+        diagnose(Ty.get()->getStartLoc(),
+                 diag::narrowed_any_constraint_must_use_eq);
+        Result.setIsParseError();
+        Ty = nullptr;
+      }
+
       if (Ty.isNonNull())
         Inherited.push_back({Ty.get()});
     }
@@ -366,6 +377,19 @@ ParserStatus Parser::parseGenericWhereClause(
         Status |= Protocol;
         if (Protocol.isNull())
           Protocol = makeParserResult(ErrorTypeRepr::create(Context, PreviousLoc));
+
+        // Reject narrowed-`Any` (`A | B`) in the colon form. v1 commits to
+        // `where T == A | B`; the colon form is reserved for a future
+        // direction (set-membership / order-insensitive marker). Substitute
+        // an ErrorTypeRepr so the rest of the requirement-realization
+        // pipeline doesn't see a NarrowedAnyType in conformance position.
+        if (isa<NarrowedAnyTypeRepr>(Protocol.get())) {
+          diagnose(Protocol.get()->getStartLoc(),
+                   diag::narrowed_any_constraint_must_use_eq);
+          Status.setIsParseError();
+          Protocol = makeParserResult(
+              ErrorTypeRepr::create(Context, Protocol.get()->getStartLoc()));
+        }
 
         // Add the requirement.
         Requirements.push_back(RequirementRepr::getTypeConstraint(
