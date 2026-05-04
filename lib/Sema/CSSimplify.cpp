@@ -15266,10 +15266,33 @@ ConstraintSystem::simplifyRestrictedConstraintImpl(
     Type baseType1 = type1->getArrayElementType();
     Type baseType2 = type2->getArrayElementType();
 
+    // Strict invariance for narrowed-`Any` element positions (proposal
+    // §"Subtyping lattice" / §"Strict-invariant rule has silent passes").
+    // Either side carrying narrowed-`Any` forces Bind, not Subtype, so
+    // `[Int]` → `[Int | String]` (leaf widening) and `[Int | String]` →
+    // `[Any]` (open-erasure) no longer slip through silently. Explicit
+    // `as` coercion is detected via the locator anchor and excluded so
+    // cross-spelling reshape (`[Int|String] as [String|Int]`) — handled
+    // downstream as a free SIL relabel — still goes through.
+    bool isExplicitCoerce = false;
+    if (auto anchor = locator.getAnchor()) {
+      if (auto *expr = anchor.dyn_cast<Expr *>())
+        isExplicitCoerce = isa<CoerceExpr>(expr);
+    }
+    auto subKind = matchKind;
+    auto containsNarrowedAny = [](Type t) -> bool {
+      return t->getCanonicalType().findIf([](Type subTy) -> bool {
+        return subTy->is<NarrowedAnyType>();
+      });
+    };
+    if (!isExplicitCoerce &&
+        (containsNarrowedAny(baseType1) || containsNarrowedAny(baseType2)))
+      subKind = ConstraintKind::Bind;
+
     increaseScore(SK_CollectionUpcastConversion, locator);
     return matchTypes(baseType1,
                       baseType2,
-                      matchKind,
+                      subKind,
                       subflags,
                       locator.withPathElement(
                           LocatorPathElt::GenericArgument(0)));
@@ -15287,6 +15310,22 @@ ConstraintSystem::simplifyRestrictedConstraintImpl(
     std::tie(key2, value2) = *isDictionaryType(t2);
 
     auto subMatchKind = matchKind; // TODO: Restrict this?
+    // Strict invariance for narrowed-`Any` Key/Value positions, same as
+    // ArrayUpcast above (explicit `as` coercion bypasses the tightening).
+    bool isExplicitCoerce = false;
+    if (auto anchor = locator.getAnchor()) {
+      if (auto *expr = anchor.dyn_cast<Expr *>())
+        isExplicitCoerce = isa<CoerceExpr>(expr);
+    }
+    auto containsNarrowedAny = [](Type t) -> bool {
+      return t->getCanonicalType().findIf([](Type subTy) -> bool {
+        return subTy->is<NarrowedAnyType>();
+      });
+    };
+    if (!isExplicitCoerce &&
+        (containsNarrowedAny(key1) || containsNarrowedAny(key2) ||
+         containsNarrowedAny(value1) || containsNarrowedAny(value2)))
+      subMatchKind = ConstraintKind::Bind;
     increaseScore(SK_CollectionUpcastConversion, locator);
     // The source key and value types must be subtypes of the destination
     // key and value types, respectively.
@@ -15315,10 +15354,27 @@ ConstraintSystem::simplifyRestrictedConstraintImpl(
     Type baseType1 = *isSetType(type1);
     Type baseType2 = *isSetType(type2);
 
+    // Strict invariance for narrowed-`Any` element positions, same as
+    // ArrayUpcast above (explicit `as` coercion bypasses the tightening).
+    bool isExplicitCoerce = false;
+    if (auto anchor = locator.getAnchor()) {
+      if (auto *expr = anchor.dyn_cast<Expr *>())
+        isExplicitCoerce = isa<CoerceExpr>(expr);
+    }
+    auto subKind = matchKind;
+    auto containsNarrowedAny = [](Type t) -> bool {
+      return t->getCanonicalType().findIf([](Type subTy) -> bool {
+        return subTy->is<NarrowedAnyType>();
+      });
+    };
+    if (!isExplicitCoerce &&
+        (containsNarrowedAny(baseType1) || containsNarrowedAny(baseType2)))
+      subKind = ConstraintKind::Bind;
+
     increaseScore(SK_CollectionUpcastConversion, locator);
     return matchTypes(baseType1,
                       baseType2,
-                      matchKind,
+                      subKind,
                       subflags,
                       locator.withPathElement(LocatorPathElt::GenericArgument(0)));
   }

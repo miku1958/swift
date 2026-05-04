@@ -231,8 +231,10 @@ func disjointReturn() -> Bool | Double {
 // from a wider leaf set to a narrower one cannot lift element-wise
 // because some inhabitants don't fit, so it is rejected at Sema with
 // the standard generic-argument-mismatch wording. Element-lift in the
-// widening direction is the implicit-conversion case (row #21 / #33);
-// see `phase2f_runtime.swift §1` for the positive bed.
+// widening direction is *also* rejected — see §20 below for the
+// `[Int]` → `[Int | String]` case; the user-facing recovery is an
+// explicit `as [Int | String]` (positive runtime bed
+// `phase2f_runtime.swift §1`).
 do {
     let zs: [Int | String] = [1, "a"]
     let _: [Int] = zs    // expected-error {{cannot assign value of type '[Int | String]' to type '[Int]'}}
@@ -266,4 +268,39 @@ do {
 do {
     let f: (Int) -> Void = { _ in }
     let _: (Int | String) -> Void = f    // expected-error {{cannot convert value of type '(Int) -> Void' to specified type '(Int | String) -> Void'}}
+}
+
+// §20. Container widening (the leaf-injection direction at direct
+// binding) — strict invariance applies symmetrically to §17's
+// narrowing direction. A leaf-typed source array cannot implicitly
+// promote into a narrowed-`Any` element type, even though every
+// element is value-level injectable. The per-element wrap is *not*
+// bit-identical (source `Array<Int>` element stride 8 bytes vs.
+// destination `Array<Int | String>` element stride 32 bytes for the
+// Any-singleton element layout), so the cast carries real SIL work
+// and must be explicit. Recovery: ` as [Int | String]`.
+//
+// Same story for `Set<Int>` → `Set<Int | String>` and for narrowing
+// to fully open `Any` (`[Int | String]` → `[Any]`). The latter is a
+// free SIL relabel (both sides hold Any-singleton element layout),
+// but the implicit conversion is still rejected — the user must
+// spell the erasure with ` as [Any]`. Together these are the three
+// "container axis" silent passes registered in proposal
+// §"Strict-invariant rule has silent passes". Function-type
+// parameter narrowing — the fourth — remains silent today and is
+// tracked separately in that gap entry.
+do {
+    let xs: [Int] = [1, 2, 3]
+    let _: [Int | String] = xs    // expected-error {{cannot assign value of type '[Int]' to type '[Int | String]'}}
+                                  // expected-note@-1 {{arguments to generic parameter 'Element' ('Int' and 'Int | String') are expected to be equal}}
+}
+do {
+    let zs: [Int | String] = [1, "a"]
+    let _: [Any] = zs    // expected-error {{cannot assign value of type '[Int | String]' to type '[Any]'}}
+                         // expected-note@-1 {{arguments to generic parameter 'Element' ('Int | String' and 'Any') are expected to be equal}}
+}
+do {
+    let s: Set<Int> = [1, 2, 3]
+    let _: Set<Int | String> = s    // expected-error {{cannot assign value of type 'Set<Int>' to type 'Set<Int | String>'}}
+                                    // expected-note@-1 {{arguments to generic parameter 'Element' ('Int' and 'Int | String') are expected to be equal}}
 }

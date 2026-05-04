@@ -7,14 +7,22 @@
 
 import Foundation
 
-// MARK: 1. Element-wise leaf injection through generic positions
-// `[Int]` assigned to `[Int | String]` works element-by-element through
-// the leaf-injection rule. Runtime layout for `Int | String` is `Any`,
-// so `Array<Int | String>` and `Array<Any>` share a layout — `type(of:)`
-// reports `Array<Any>` (the canonical runtime form).
+// MARK: 1. Element-wise leaf injection through generic positions (with
+// explicit `as`)
+// `[Int]` is *not* implicitly assignable to `[Int | String]` — container
+// element positions are strictly invariant in narrowed-`Any` (proposal
+// §"Subtyping lattice" / §"Strict-invariant rule has silent passes").
+// The leaf-injection rule applies element-by-element only at value
+// level; widening every element of an array requires an explicit cast,
+// because per-element wrapping is not bit-identical (the source
+// `Array<Int>` element stride is 8 bytes vs the destination
+// `Array<Int | String>` element stride is 32 bytes for the Any-singleton
+// layout). The explicit `as` wires the per-element widen at the SIL
+// boundary; the runtime form is still `Array<Any>` (Any-singleton
+// element layout), so `type(of:)` reports `Array<Any>`.
 do {
     let ints: [Int] = [1, 2, 3]
-    let promoted: [Int | String] = ints
+    let promoted: [Int | String] = ints as [Int | String]
     assert(promoted.count == 3)
     assert(promoted[0] as? Int == 1)
     assert(promoted[2] as? Int == 3)
