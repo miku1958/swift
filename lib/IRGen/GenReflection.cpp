@@ -292,16 +292,12 @@ getRuntimeVersionThatSupportsDemanglingType(CanType type) {
         return addRequirement(Swift_6_0);
     }
 
-    // Slice 32: narrowed-Any uses the `XN` operator that no shipping
-    // runtime knows how to demangle. Mark any type containing a
-    // narrowed-Any subtree as "newer than any runtime" so getTypeRef
-    // routes through getTypeRefByFunction (a per-module callback that
-    // returns the metadata directly) instead of the static mangled
-    // string. Without this, Mirror reflection, generic substitution
-    // maps, and other lazy-demangle paths abort with "unable to
-    // demangle the type ... 'Si_SSXN'".
-    if (isa<NarrowedAnyType>(t))
-      return addRequirement(Latest);
+    // Narrowed-Any unconditional short-circuit lives in
+    // mangledNameIsUnknownToDeployTarget instead of here — pinning to
+    // Latest (= Swift_6_2) is not enough, because on a current macOS
+    // SDK the deployment target's runtimeCompatVersion can already be
+    // >= 6.2, making the `<` comparison false and the static mangled
+    // name emit anyway. See mangledNameIsUnknownToDeployTarget.
 
     return false;
   });
@@ -474,6 +470,24 @@ getTypeRefByFunction(IRGenModule &IGM, CanGenericSignature sig, CanType t,
 
 bool swift::irgen::mangledNameIsUnknownToDeployTarget(IRGenModule &IGM,
                                                       CanType type) {
+  // Narrowed-Any uses the `XN` mangling operator that no shipping
+  // runtime — including the most recent — knows how to demangle.
+  // Always route through the per-module accessor function regardless
+  // of deployment target. (When `XN` actually ships in stdlib's
+  // demangler, this short-circuit can move into
+  // getRuntimeVersionThatSupportsDemanglingType pinned to that ship
+  // version.)
+  bool containsNarrowedAny = false;
+  type.findIf([&](CanType t) -> bool {
+    if (isa<NarrowedAnyType>(t)) {
+      containsNarrowedAny = true;
+      return true;
+    }
+    return false;
+  });
+  if (containsNarrowedAny)
+    return true;
+
   if (auto runtimeCompatVersion = getSwiftRuntimeCompatibilityVersionForTarget(
           IGM.Context.LangOpts.Target)) {
     if (auto minimumSupportedRuntimeVersion =

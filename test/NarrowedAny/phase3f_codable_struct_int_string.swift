@@ -130,7 +130,47 @@ do {
            "SI `\"hello\"`: String wins first")
 }
 
-// MARK: 5. Wire shape matches no leaf — both spellings raise
+// MARK: 5b. Reflection of a top-level struct field of narrowed-Any
+// type displays the actual value, not `()`.
+//
+// Pre-row-#35 fix, `print(IS(b: 7))` showed `IS(b: ())` and the
+// runtime emitted "the Swift runtime was unable to demangle the
+// type of field 'b' ... 'Si_SSXN'". Slice 32 routed lazy-demangle
+// type-refs through getTypeRefByFunction *only when* the deployment
+// target's runtimeCompatVersion was older than the version pinned
+// by getRuntimeVersionThatSupportsDemanglingType (Swift_6_2). On a
+// current macOS SDK that comparison is false and the static mangled
+// name leaks out — the system runtime then chokes on `XN`.
+//
+// The row-#35 part-(c) fix moves the narrowed-Any short-circuit
+// into mangledNameIsUnknownToDeployTarget directly: any type tree
+// that contains a NarrowedAnyType always gets the per-module
+// accessor function, regardless of deployment target. Mirror,
+// String(describing:) and print all then read the actual leaf.
+do {
+    let v = IS(b: 7)
+    let s = String(describing: v)
+    assert(s == "IS(b: 7)",
+           "String(describing:) of narrowed-Any field shows the leaf value, got: \(s)")
+
+    let v2 = IS(b: "hello")
+    let s2 = String(describing: v2)
+    assert(s2 == #"IS(b: "hello")"#,
+           "String(describing:) shows the String leaf, got: \(s2)")
+
+    let m = Mirror(reflecting: v)
+    var sawB = false
+    for child in m.children {
+        if child.label == "b" {
+            assert((child.value as? Int) == 7,
+                   "Mirror reads top-level struct field as Int 7, not ()")
+            sawB = true
+        }
+    }
+    assert(sawB, "Mirror exposes the `b` child label")
+}
+
+// MARK: 6. Wire shape matches no leaf — both spellings raise
 // DecodingError, not a silent default.
 do {
     let dec = JSONDecoder()
